@@ -63,6 +63,9 @@ int __init parse_dom0less_node(struct dt_device_node *node,
 
         if ( val & DOMAIN_CAPS_DEVICE_MODEL )
             d_cfg->flags |= XEN_DOMCTL_CDF_device_model;
+
+        if ( val & DOMAIN_CAPS_NOT_HYPERCALL_TARGET )
+            d_cfg->flags |= XEN_DOMCTL_CDF_not_hypercall_target;
     }
 
     if ( dt_find_property(node, "xen,static-mem", NULL) )
@@ -72,6 +75,9 @@ int __init parse_dom0less_node(struct dt_device_node *node,
 
         *flags |= CDF_staticmem;
     }
+
+    if ( dt_property_read_bool(node, "hypercall-untargetable") )
+        d_cfg->flags |= XEN_DOMCTL_CDF_not_hypercall_target;
 
     if ( dt_property_read_bool(node, "direct-map") )
     {

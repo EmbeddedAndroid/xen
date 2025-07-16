@@ -375,6 +375,12 @@ with the following properties:
     passed through. This option is the default if this property is missing
     and the user does not provide the device partial device tree for the domain.
 
+- hypercall-untargetable
+
+    Optional.  An empty property to specify the domain cannot be the target
+    of hypercalls.  This protects a domain for freedom of interference from
+    other domains.
+
 - xen,sci_type
 
     A string property specifying an ARM SCI type for the guest.
