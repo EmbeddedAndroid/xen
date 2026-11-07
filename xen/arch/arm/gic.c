@@ -207,12 +207,28 @@ int gic_irq_xlate(const u32 *intspec, unsigned int intsize,
     if ( intsize < 3 )
         return -EINVAL;
 
-    /* Get the interrupt number and add 16 to skip over SGIs */
-    *out_hwirq = intspec[1] + 16;
+    /* First cell: interrupt type, as in the Linux GIC bindings */
+    switch ( intspec[0] )
+    {
+    case 0: /* SPI */
+        *out_hwirq = intspec[1] + NR_LOCAL_IRQS;
+        break;
 
-    /* For SPIs, we need to add 16 more to get the GIC irq ID number */
-    if ( !intspec[0] )
-        *out_hwirq += 16;
+    case 1: /* PPI */
+        *out_hwirq = intspec[1] + NR_GIC_SGI;
+        break;
+
+#ifdef CONFIG_GICV3_ESPI
+    case 2: /* Extended SPI */
+        if ( intspec[1] >= NR_ESPI_IRQS )
+            return -EINVAL;
+        *out_hwirq = intspec[1] + ESPI_BASE_INTID;
+        break;
+#endif
+
+    default:
+        return -EINVAL;
+    }
 
     if ( out_type )
         *out_type = intspec[2] & IRQ_TYPE_SENSE_MASK;
