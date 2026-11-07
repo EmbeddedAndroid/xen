@@ -7,8 +7,12 @@
  * Copyright (c) 2024 EPAM Systems.
  */
 
+#include <xen/bitmap.h>
+#include <xen/device_tree.h>
 #include <xen/sched.h>
+#include <asm/irq.h>
 #include <asm/platform.h>
+#include <asm/setup.h>
 #include <asm/smccc.h>
 
 /* Secure Channel Manager (SCM) "INFO" service, as used by Linux qcom_scm */
@@ -66,8 +70,116 @@ static bool qcom_smc(struct cpu_user_regs *regs)
     return true;
 }
 
+/*
+ * The Power Domain Controller ("qcom,pdc") sits between wakeup capable
+ * interrupt lines and the GIC: a device interrupt described as PDC pin N
+ * reaches the GIC as the SPI that "qcom,pdc-ranges" maps N to. The PDC
+ * has no interrupt of its own, so the generic code never routes those
+ * SPIs to the hardware domain, which drives the PDC. Route them, with the
+ * trigger the PDC presents to the GIC: it turns falling edges into rising
+ * ones, both edges into rising and low levels into high ones (as Linux
+ * irq-qcom-pdc.c does).
+ */
+static unsigned int qcom_pdc_gic_type(uint32_t flags)
+{
+    switch ( flags & DT_IRQ_TYPE_SENSE_MASK )
+    {
+    case DT_IRQ_TYPE_EDGE_RISING:
+    case DT_IRQ_TYPE_EDGE_FALLING:
+    case DT_IRQ_TYPE_EDGE_BOTH:
+        return DT_IRQ_TYPE_EDGE_RISING;
+    default:
+        return DT_IRQ_TYPE_LEVEL_HIGH;
+    }
+}
+
+static int qcom_pdc_pin_to_spi(const struct dt_device_node *pdc,
+                               uint32_t pin)
+{
+    const __be32 *cells;
+    u32 len;
+    unsigned int i;
+
+    cells = dt_get_property(pdc, "qcom,pdc-ranges", &len);
+    if ( !cells || len % (3 * sizeof(*cells)) )
+        return -EINVAL;
+
+    for ( i = 0; i < len / sizeof(*cells); i += 3 )
+    {
+        uint32_t base = be32_to_cpu(cells[i]);
+        uint32_t spi = be32_to_cpu(cells[i + 1]);
+        uint32_t count = be32_to_cpu(cells[i + 2]);
+
+        if ( pin >= base && pin - base < count )
+            return NR_LOCAL_IRQS + spi + (pin - base);
+    }
+
+    return -ENOENT;
+}
+
+static int __init qcom_route_pdc_irqs(struct domain *d)
+{
+    const struct dt_device_node *pdc;
+    struct dt_device_node *np;
+    DECLARE_BITMAP(routed, NR_IRQS) = { 0 };
+
+    pdc = dt_find_compatible_node(NULL, NULL, "qcom,pdc");
+    if ( !pdc )
+        return 0;
+
+    dt_for_each_device_node ( dt_host, np )
+    {
+        unsigned int i, nirq;
+
+        if ( !dt_device_is_available(np) ||
+             dt_device_used_by(np) == DOMID_XEN )
+            continue;
+
+        nirq = dt_number_of_irq(np);
+        for ( i = 0; i < nirq; i++ )
+        {
+            struct dt_raw_irq rirq;
+            unsigned int type;
+            int irq, rc;
+
+            if ( dt_device_get_raw_irq(np, i, &rirq) ||
+                 rirq.controller != pdc || rirq.size != 2 )
+                continue;
+
+            irq = qcom_pdc_pin_to_spi(pdc, rirq.specifier[0]);
+            if ( irq < 0 || irq >= NR_IRQS )
+            {
+                printk(XENLOG_WARNING "%s: PDC pin %u has no SPI\n",
+                       dt_node_full_name(np), rirq.specifier[0]);
+                continue;
+            }
+
+            type = qcom_pdc_gic_type(rirq.specifier[1]);
+            if ( test_and_set_bit(irq, routed) )
+            {
+                if ( irq_to_desc(irq)->arch.type != type )
+                    printk(XENLOG_WARNING
+                           "%s: PDC SPI %d already routed with another trigger\n",
+                           dt_node_full_name(np), irq);
+                continue;
+            }
+
+            /* A failure costs this interrupt only, not the domain. */
+            rc = irq_set_spi_type(irq, type);
+            if ( !rc )
+                rc = map_irq_to_domain(d, irq, true, dt_node_name(np));
+            if ( rc )
+                printk(XENLOG_WARNING "%s: unable to route PDC SPI %d to %pd: %d\n",
+                       dt_node_full_name(np), irq, d, rc);
+        }
+    }
+
+    return 0;
+}
+
 PLATFORM_START(qcom, "Qualcomm")
     .compatible = qcom_dt_compat,
+    .specific_mapping = qcom_route_pdc_irqs,
     .smc = qcom_smc,
 PLATFORM_END
 
