@@ -35,6 +35,7 @@
 
 static const char * const qcom_dt_compat[] __initconst =
 {
+    "qcom,eliza",
     "qcom,nord",
     "qcom,sa8155p",
     NULL
