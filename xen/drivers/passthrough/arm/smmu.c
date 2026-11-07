@@ -945,8 +945,15 @@ static int arm_smmu_dt_add_device_generic(u8 devfn, struct device *dev)
 		return -ENXIO;
 
 	smmu = find_smmu(fwspec->iommu_dev);
-	if (smmu == NULL)
-		return -ENXIO;
+	if (smmu == NULL) {
+		/*
+		 * The master's SMMU was not taken by this driver (it failed
+		 * its probe, e.g. one without translation support). As for
+		 * an unavailable IOMMU, the device is left unprotected.
+		 */
+		iommu_fwspec_free(dev);
+		return 1;
+	}
 
 	ret = arm_smmu_dt_add_device_legacy(smmu, dev, fwspec);
 	if ( ret )
