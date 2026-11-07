@@ -799,6 +799,10 @@ static int __init find_memory_holes(const struct kernel_info *kinfo,
                 goto out;
             }
 
+            /* E.g. a memory node whose size the firmware leaves to EFI */
+            if ( !size )
+                continue;
+
             start = addr & PAGE_MASK;
             end = PAGE_ALIGN(addr + size);
             res = rangeset_remove_range(mem_holes, PFN_DOWN(start),
