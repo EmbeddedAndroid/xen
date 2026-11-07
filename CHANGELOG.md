@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
      afterwards.
 
 ### Added
+ - On Arm:
+   - Support for the Qualcomm SA8797P (Nord) and the Qualcomm GENI UART
+     driver.
 
 ### Removed
  - On Arm:
