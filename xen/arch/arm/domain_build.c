@@ -261,7 +261,10 @@ fail:
  * 6. We want to have a few largers banks rather than many smaller ones.
  *
  * For the first two requirements we need to make sure that the lowest
- * bank is sufficiently large.
+ * bank is sufficiently large. A 64-bit kernel, ramdisk and DTB that do
+ * not fit in it are loaded into a later bank instead (see
+ * kernel_zimage_load()), so the lowest bank is still allocated below 4GB
+ * for requirement 4.
  *
  * For convenience we also sort the banks by physical address.
  *
@@ -331,34 +334,16 @@ static void __init allocate_memory_11(struct domain *d,
         for ( bits = order ; bits <= lowmem_bitsize; bits++ )
         {
             pg = alloc_domheap_pages(d, order, MEMF_bits(bits));
-            if ( pg == NULL )
-                continue;
-
-            /*
-             * The kernel, DTB and initrd are placed in bank 0. A smaller
-             * low bank cannot hold them either: allocate bank 0 from
-             * above the lowmem region instead.
-             */
-            if ( !arch_hwdom_first_bank_can_fit_modules(kinfo,
-                                                        page_to_maddr(pg),
-                                                        PAGE_SIZE << order) )
+            if ( pg != NULL )
             {
-                printk(XENLOG_INFO
-                       "%luMB below %u-bit cannot hold the boot modules\n",
-                       (PAGE_SIZE << order) >> 20, lowmem_bitsize);
-                free_domheap_pages(pg, order);
-                goto no_low_bank0;
+                if ( !insert_11_bank(d, kinfo, pg, order) )
+                    BUG(); /* Cannot fail for first bank */
+
+                goto got_bank0;
             }
-
-            if ( !insert_11_bank(d, kinfo, pg, order) )
-                BUG(); /* Cannot fail for first bank */
-
-            goto got_bank0;
         }
         order--;
     }
-
- no_low_bank0:
 
     /* Failed to allocate bank0 in the lowmem region. */
     if ( is_32bit_domain(d) )
