@@ -720,6 +720,17 @@ int dt_child_n_addr_cells(const struct dt_device_node *parent);
 bool dt_device_is_available(const struct dt_device_node *device);
 
 /**
+ * dt_device_reg_is_cpu_address - Check if a node's "reg" is a CPU address
+ *
+ * @device: Node to check
+ *
+ * Returns true when every bus between the node and the root translates its
+ * children's addresses ("ranges"), false when "reg" is local to a bus such
+ * as SPMI, I2C or SPI.
+ */
+bool dt_device_reg_is_cpu_address(const struct dt_device_node *device);
+
+/**
  * dt_device_for_passthrough - Check if a device will be used for
  * passthrough later
  *
