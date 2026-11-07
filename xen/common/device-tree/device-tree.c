@@ -1642,6 +1642,20 @@ int dt_device_get_irq(const struct dt_device_node *device, unsigned int index,
     return dt_irq_translate(&raw, out_irq);
 }
 
+bool dt_device_reg_is_cpu_address(const struct dt_device_node *device)
+{
+    const struct dt_device_node *p;
+
+    for ( p = dt_get_parent(device); p && dt_get_parent(p);
+          p = dt_get_parent(p) )
+    {
+        if ( !dt_get_property(p, "ranges", NULL) )
+            return false;
+    }
+
+    return true;
+}
+
 bool dt_device_is_available(const struct dt_device_node *device)
 {
     const char *status;

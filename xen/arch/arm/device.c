@@ -310,6 +310,13 @@ int __overlay_init handle_device(struct domain *d, struct dt_device_node *dev,
     if ( res < 0 )
         return res;
 
+    /* A bus-local "reg" (below SPMI, I2C, SPI) is not MMIO. */
+    if ( naddr && !dt_device_reg_is_cpu_address(dev) )
+    {
+        dt_dprintk("%s: bus-local reg, not mapped\n", dt_node_full_name(dev));
+        naddr = 0;
+    }
+
     /* Give permission and map MMIOs */
     for ( i = 0; i < naddr; i++ )
     {

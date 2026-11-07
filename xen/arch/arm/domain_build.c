@@ -807,6 +807,10 @@ static int __init find_memory_holes(const struct kernel_info *kinfo,
 
         naddr = dt_number_of_address(np);
 
+        /* A bus-local "reg" cannot overlap an extended region. */
+        if ( naddr && !dt_device_reg_is_cpu_address(np) )
+            continue;
+
         for ( i = 0; i < naddr; i++ )
         {
             res = dt_device_get_paddr(np, i, &addr, &size);
