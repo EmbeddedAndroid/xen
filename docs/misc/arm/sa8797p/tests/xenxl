@@ -1,0 +1,87 @@
+#!/bin/sh
+# xenxl <phase>: Xen toolstack and guest cases in dom0, one
+# "NORDTC xl<phase>.<case> <result>" line per case on the console.
+p=$1
+r() { echo "NORDTC xl$p.$1 $2"; }
+log() { sed "s/^/NORDLOG xl$p $1: /"; }
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/xen/bin
+# BusyBox here has no process lookup tool.
+running() {
+	for c in /proc/[0-9]*/comm; do
+		[ "$(cat "$c" 2> /dev/null)" = "$1" ] && return 0
+	done
+	return 1
+}
+mkdir -p /proc/xen /var/run/xen /var/run/xenstored /var/lib/xen /var/lib/xenstored /var/log/xen/console /var/xen/dump
+grep -q xenfs /proc/mounts || mount -t xenfs xenfs /proc/xen
+if [ ! -x /usr/sbin/xl ]; then r toolstack-present fail; exit 0; fi
+r toolstack-present pass
+if ! running xenstored; then
+	xenstored --pid-file /var/run/xenstored.pid > /tmp/xenstored.log 2>&1
+	sleep 1
+fi
+running xenstored && r xenstored pass || { r xenstored fail; log xenstored < /tmp/xenstored.log; exit 0; }
+xen-init-dom0 > /tmp/init-dom0.log 2>&1 && r init-dom0 pass || { r init-dom0 fail; log init-dom0 < /tmp/init-dom0.log; }
+running xenconsoled || xenconsoled --log=guest --log-dir=/var/log/xen/console --pid-file=/var/run/xenconsoled.pid
+running xenconsoled && r xenconsoled pass || r xenconsoled fail
+xl info > /tmp/xlinfo 2>&1 && r info pass || r info fail
+log info < /tmp/xlinfo
+grep -q "^nr_cpus *: 18" /tmp/xlinfo && r info-18-cpus pass || r info-18-cpus fail
+xl list > /tmp/xllist 2>&1 && grep -q '^Domain-0 ' /tmp/xllist && r list-dom0 pass || r list-dom0 fail
+xl dmesg > /tmp/xldmesg 2>&1 && r dmesg pass || r dmesg fail
+grep -i -E 'smmu|iommu|warn|error|qcom|unhandled|gic|its' /tmp/xldmesg | head -60 | log xl-dmesg
+
+# boot(name, cfg): create, wait for the guest to power itself off.
+waitgone() { # <name> <seconds>
+	i=0
+	while xl domid "$1" > /dev/null 2>&1; do
+		sleep 1; i=$((i + 1)); [ $i -ge $2 ] && return 1
+	done
+	return 0
+}
+glog() { cat "/var/log/xen/console/guest-$1.log" 2> /dev/null; }
+up() { glog "$1" | grep -q "NXDOMU-UP $1 "; }
+down() { glog "$1" | grep -q "NXDOMU-DOWN $1"; }
+
+# 1. One guest, 1 vCPU, boots and powers itself off.
+xl create /etc/xen/nx/d1.cfg > /tmp/c-d1 2>&1 && r create-d1 pass || { r create-d1 fail; log create-d1 < /tmp/c-d1; }
+waitgone d1 180 && r d1-poweroff pass || { r d1-poweroff fail; xl destroy d1 2> /dev/null; }
+up d1 && r d1-booted pass || r d1-booted fail
+down d1 && r d1-clean-shutdown pass || r d1-clean-shutdown fail
+glog d1 | tail -40 | log d1-console
+
+# 2. Four guests in parallel, 2 vCPUs each.
+for n in 1 2 3 4; do
+	sed "s/@N@/p$n/g" /etc/xen/nx/par.cfg > /tmp/p$n.cfg
+	xl create /tmp/p$n.cfg > /tmp/c-p$n 2>&1 || log create-p$n < /tmp/c-p$n
+done
+sleep 5
+xl list | log list-parallel
+running=$(xl list | grep -c '^p[1-4] ')
+[ "$running" = 4 ] && r parallel-4-running pass || r parallel-4-running fail
+ok=0
+for n in 1 2 3 4; do
+	waitgone p$n 240 || xl destroy p$n 2> /dev/null
+	up p$n && down p$n && ok=$((ok + 1))
+done
+[ $ok = 4 ] && r parallel-4-clean pass || r parallel-4-clean fail
+
+# 3. Toolstack-driven shutdown of a guest that stays up.
+xl create /etc/xen/nx/s1.cfg > /tmp/c-s1 2>&1 || log create-s1 < /tmp/c-s1
+i=0; while ! up s1 && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done
+up s1 && r s1-booted pass || r s1-booted fail
+xl shutdown s1 > /tmp/sd-s1 2>&1
+if waitgone s1 120; then r s1-xl-shutdown pass; else r s1-xl-shutdown fail; log s1 < /tmp/sd-s1; xl destroy s1 2> /dev/null; fi
+down s1 && r s1-clean-shutdown pass || r s1-clean-shutdown fail
+
+# 4. Destroy a running guest; its memory comes back.
+free0=$(xl info | sed -n 's/^free_memory *: //p')
+xl create /etc/xen/nx/s1.cfg > /dev/null 2>&1
+sleep 20
+xl destroy s1 && r destroy pass || r destroy fail
+sleep 2
+free1=$(xl info | sed -n 's/^free_memory *: //p')
+echo "free_memory before $free0 after $free1" | log memory
+[ -n "$free0" ] && [ "$free0" = "$free1" ] && r destroy-memory-returned pass || r destroy-memory-returned fail
+xl list | log list-end
+xl dmesg | tail -60 | log xl-dmesg-end

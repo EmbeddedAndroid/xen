@@ -1,0 +1,27 @@
+#!/bin/sh
+# xenchk <phase>: dom0 checks under Xen, one "NORDTC xen<phase>.<case> <result>"
+# line per case on the console.
+p=$1
+r() { echo "NORDTC xen$p.$1 $2"; }
+xfp=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^nxenfp=//p' | tail -1)
+t=$(cat /sys/hypervisor/type 2>/dev/null)
+[ "$t" = xen ] && r hypervisor-type pass || r hypervisor-type fail
+v="$(cat /sys/hypervisor/version/major 2>/dev/null).$(cat /sys/hypervisor/version/minor 2>/dev/null)$(cat /sys/hypervisor/version/extra 2>/dev/null)"
+echo "NORDLOG xen$p: hypervisor version $v"
+# version/extra holds 15 characters; the full banner is in the Xen console
+# ring (xl dmesg works without xenstored).
+if [ -n "$xfp" ] && /usr/sbin/xl dmesg 2> /dev/null | grep -q "Xen version .*$xfp"; then
+	r version-fingerprint pass
+else
+	r version-fingerprint fail
+fi
+[ -d /proc/xen ] || mkdir -p /proc/xen
+grep -q xenfs /proc/mounts || mount -t xenfs xenfs /proc/xen 2>/dev/null
+grep -q control_d /proc/xen/capabilities 2>/dev/null && r dom0-control pass || r dom0-control fail
+n=$(nproc)
+echo "NORDLOG xen$p: dom0 cpus $n, $(grep MemTotal /proc/meminfo)"
+[ "$n" = 18 ] && r dom0-vcpus-18 pass || r dom0-vcpus-18 fail
+grep -q ' /esp ' /proc/mounts && r ufs-esp-mounted pass || r ufs-esp-mounted fail
+dmesg | grep -i -E 'xen|scm|smmu|iommu|optee|tee:|hvc|psci|Unhandled|BUG|WARNING|error' | head -80 | sed "s/^/NORDLOG xen$p dmesg: /"
+w=$(dmesg | grep -c -E 'WARNING:|BUG:|Oops|Call trace')
+[ "$w" = 0 ] && r dom0-kernel-clean pass || r dom0-kernel-clean fail

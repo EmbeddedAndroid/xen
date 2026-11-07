@@ -1,0 +1,21 @@
+#!/bin/busybox sh
+# domU init: report to hvc0, then power off (nxmode=once) or wait for the
+# toolstack's shutdown request (nxmode=stay), which the kernel turns into
+# /sbin/poweroff.
+B=/bin/busybox
+$B mount -t proc proc /proc
+$B mount -t sysfs sys /sys
+$B mount -t devtmpfs dev /dev 2> /dev/null
+arg() { $B tr ' ' '\n' < /proc/cmdline | $B sed -n "s/^$1=//p" | $B tail -1; }
+name=$(arg nxname) mode=$(arg nxmode)
+echo "NXDOMU-UP $name $($B uname -r) cpus=$($B nproc) hyp=$($B cat /sys/hypervisor/type 2> /dev/null) mem=$($B sed -n 's/MemTotal: *//p' /proc/meminfo)"
+# FF-A as this guest sees it (xenffa): firmware found, OP-TEE bound, /dev/tee0.
+f=0; o=0; t=0
+$B dmesg | $B grep -q 'ARM FF-A: Firmware version' && f=1
+$B dmesg | $B grep -q 'optee: initialized driver' && o=1
+[ -c /dev/tee0 ] && t=1
+echo "NXDOMU-FFA $name ffa=$f optee=$o tee0=$t"
+if [ "$mode" = stay ]; then
+	while :; do $B sleep 60; done
+fi
+exec /sbin/poweroff

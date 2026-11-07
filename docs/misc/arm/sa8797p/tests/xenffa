@@ -1,0 +1,47 @@
+#!/bin/sh
+# xenffa <phase> dom0|guests: FF-A through Xen's FF-A mediator, one
+# "NORDTC ffa<phase>.<case> <result>" line per case on the console.
+# dom0: Xen probed the SPMC and selected its FF-A mediator, dom0's FF-A
+# driver found the firmware and the OP-TEE driver bound over FF-A.
+# guests: a guest created with tee="ffa" reaches OP-TEE, one without it
+# does not (Xen answers its FF-A calls with NOT_SUPPORTED).
+p=$1
+r() { echo "NORDTC ffa$p.$1 $2"; }
+log() { sed "s/^/NORDLOG ffa$p $1: /"; }
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/xen/bin
+if [ "$2" = dom0 ]; then
+	xl dmesg > /tmp/ffa-xl 2>&1
+	grep -i -E 'ffa|FF-A|tee' /tmp/ffa-xl | head -30 | log xl-dmesg
+	grep -q 'Using TEE mediator for FF-A' /tmp/ffa-xl && r xen-mediator pass || r xen-mediator fail
+	grep -q 'ARM FF-A Firmware version 1\.' /tmp/ffa-xl && r xen-spmc-version pass || r xen-spmc-version fail
+	dmesg | grep -i -E 'ffa|FF-A|optee|tee' | head -30 | log dmesg
+	dmesg | grep -q 'ARM FF-A: Firmware version' && r dom0-ffa-driver pass || r dom0-ffa-driver fail
+	dmesg | grep -q 'optee: initialized driver' && r dom0-optee-bound pass || r dom0-optee-bound fail
+	[ -c /dev/tee0 ] && [ -c /dev/teepriv0 ] && r dom0-tee-devices pass || r dom0-tee-devices fail
+	exit 0
+fi
+mkdir -p /proc/xen /var/run/xen /var/run/xenstored /var/lib/xen /var/lib/xenstored /var/log/xen/console /var/xen/dump
+grep -q xenfs /proc/mounts || mount -t xenfs xenfs /proc/xen
+running() {
+	for c in /proc/[0-9]*/comm; do
+		[ "$(cat "$c" 2> /dev/null)" = "$1" ] && return 0
+	done
+	return 1
+}
+running xenstored || { xenstored --pid-file /var/run/xenstored.pid > /tmp/xenstored.log 2>&1; sleep 1; }
+xen-init-dom0 > /dev/null 2>&1 || true
+running xenconsoled || xenconsoled --log=guest --log-dir=/var/log/xen/console --pid-file=/var/run/xenconsoled.pid
+glog() { cat "/var/log/xen/console/guest-$1.log" 2> /dev/null; }
+# guest <name> <cfg>: create, wait for the init's NXDOMU-FFA line, destroy.
+guest() {
+	xl create "$2" > /tmp/c-$1 2>&1 || { r $1-create fail; log create-$1 < /tmp/c-$1; return; }
+	r $1-create pass
+	i=0; while ! glog $1 | grep -q "NXDOMU-FFA $1 " && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done
+	xl destroy $1 2> /dev/null
+	glog $1 | grep -i -E 'NXDOMU|ffa|FF-A|optee|tee' | head -20 | log $1
+}
+guest f1 /etc/xen/nx/f1.cfg
+glog f1 | grep -q 'NXDOMU-FFA f1 ffa=1 optee=1 tee0=1' && r f1-optee-reachable pass || r f1-optee-reachable fail
+guest f0 /etc/xen/nx/f0.cfg
+glog f0 | grep -q 'NXDOMU-FFA f0 ffa=0 optee=0 tee0=0' && r f0-optee-denied pass || r f0-optee-denied fail
+xl dmesg | tail -40 | grep -i -E 'ffa|FF-A|d[0-9]+v' | log xl-dmesg-guests

@@ -1,0 +1,6 @@
+#!/bin/busybox sh
+B=/bin/busybox
+name=$($B tr ' ' '\n' < /proc/cmdline | $B sed -n 's/^nxname=//p' | $B tail -1)
+echo "NXDOMU-DOWN $name" > /dev/hvc0 2> /dev/null || echo "NXDOMU-DOWN $name"
+$B sync
+$B poweroff -f
