@@ -268,6 +268,7 @@ F:	docs/misc/arm/
 F:	xen/arch/arm/
 F:	xen/drivers/char/cadence-uart.c
 F:	xen/drivers/char/exynos4210-uart.c
+F:	xen/drivers/char/geni-uart.c
 F:	xen/drivers/char/imx-lpuart.c
 F:	xen/drivers/char/imx-uart.c
 F:	xen/drivers/char/meson-uart.c
