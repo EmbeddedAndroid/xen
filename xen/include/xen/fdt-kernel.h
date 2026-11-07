@@ -45,6 +45,9 @@ struct kernel_info {
     /* Interrupt controller phandle */
     uint32_t phandle_intc;
 
+    /* Number of cells in an interrupt specifier of that controller */
+    uint32_t intc_cells;
+
     /*
      * Next free phandle for guest device nodes; do not access directly, use
      * alloc_phandle().

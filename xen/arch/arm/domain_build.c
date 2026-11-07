@@ -659,6 +659,8 @@ void __init set_interrupt(gic_interrupt_t interrupt,
     dt_set_cell(&cells, 1, is_ppi); /* is a PPI? */
     dt_set_cell(&cells, 1, irq);
     dt_set_cell(&cells, 1, (cpumask << 8) | level);
+    /* The fourth cell, when used, names no PPI partition: all CPUs */
+    dt_set_cell(&cells, 1, 0);
 }
 
 /*
@@ -667,16 +669,25 @@ void __init set_interrupt(gic_interrupt_t interrupt,
  *  "interrupts": contains the list of interrupts
  *  "interrupt-parent": link to the GIC
  */
-static int __init fdt_property_interrupts(const struct kernel_info *kinfo,
-                                          gic_interrupt_t *intr,
-                                          unsigned int num_irq)
+int __init fdt_property_interrupts(const struct kernel_info *kinfo,
+                                   gic_interrupt_t *intr,
+                                   unsigned int num_irq)
 {
+    const unsigned int cells = kinfo->intc_cells;
+    __be32 *val;
+    unsigned int i;
     int res;
 
-    res = fdt_property(kinfo->fdt, "interrupts",
-                       intr, sizeof(intr[0]) * num_irq);
+    ASSERT(cells >= 3 && cells <= GIC_INTERRUPT_MAX_CELLS);
+
+    res = fdt_property_placeholder(kinfo->fdt, "interrupts",
+                                   num_irq * cells * sizeof(__be32),
+                                   (void **)&val);
     if ( res )
         return res;
+
+    for ( i = 0; i < num_irq; i++, val += cells )
+        memcpy(val, intr[i], cells * sizeof(__be32));
 
     res = fdt_property_cell(kinfo->fdt, "interrupt-parent",
                             kinfo->phandle_intc);
@@ -1339,9 +1350,11 @@ int __init make_cpus_node(const struct domain *d, struct kernel_info *kinfo)
     return res;
 }
 
-static int __init make_gic_node(const struct domain *d, void *fdt,
+static int __init make_gic_node(const struct domain *d,
+                                const struct kernel_info *kinfo,
                                 const struct dt_device_node *node)
 {
+    void *fdt = kinfo->fdt;
     const struct dt_device_node *gic = dt_interrupt_controller;
     int res = 0;
     const void *addrcells, *sizecells;
@@ -1396,7 +1409,7 @@ static int __init make_gic_node(const struct domain *d, void *fdt,
             return res;
     }
 
-    res = fdt_property_cell(fdt, "#interrupt-cells", 3);
+    res = fdt_property_cell(fdt, "#interrupt-cells", kinfo->intc_cells);
     if ( res )
         return res;
 
@@ -1557,7 +1570,7 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
      * used_by DOMID_XEN so this check comes first.
      */
     if ( device_get_class(node) == DEVICE_INTERRUPT_CONTROLLER )
-        return make_gic_node(d, kinfo->fdt, node);
+        return make_gic_node(d, kinfo, node);
     if ( dt_match_node(timer_matches, node) )
         return make_timer_node(kinfo);
 
@@ -1719,6 +1732,21 @@ static int __init prepare_dtb_hwdom(struct domain *d, struct kernel_info *kinfo)
     ASSERT(dt_host && (dt_host->sibling == NULL));
 
     kinfo->phandle_intc = dt_interrupt_controller->phandle;
+
+    /*
+     * The device nodes are copied unchanged, so their interrupt specifiers
+     * are only meaningful with the host's #interrupt-cells: four when the
+     * GIC binding's PPI affinity cell is used.
+     */
+    if ( !dt_property_read_u32(dt_interrupt_controller, "#interrupt-cells",
+                               &kinfo->intc_cells) ||
+         kinfo->intc_cells < 3 || kinfo->intc_cells > GIC_INTERRUPT_MAX_CELLS )
+    {
+        printk(XENLOG_ERR "%s: unsupported #interrupt-cells\n",
+               dt_node_full_name(dt_interrupt_controller));
+        return -EINVAL;
+    }
+
     fdt = device_tree_flattened;
 
     new_size = fdt_totalsize(fdt) + HWDOM_FDT_EXTRA_SIZE;

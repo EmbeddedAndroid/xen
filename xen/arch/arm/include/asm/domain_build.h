@@ -4,7 +4,9 @@
 #include <xen/fdt-kernel.h>
 #include <xen/sched.h>
 
-typedef __be32 gic_interrupt_t[3];
+/* An interrupt specifier of the GIC binding: three cells, or four */
+#define GIC_INTERRUPT_MAX_CELLS 4
+typedef __be32 gic_interrupt_t[GIC_INTERRUPT_MAX_CELLS];
 int make_psci_node(void *fdt);
 void evtchn_allocate(struct domain *d);
 
@@ -14,6 +16,9 @@ void evtchn_allocate(struct domain *d);
  */
 void set_interrupt(gic_interrupt_t interrupt, unsigned int irq,
                    unsigned int cpumask, unsigned int level);
+
+int fdt_property_interrupts(const struct kernel_info *kinfo,
+                            gic_interrupt_t *intr, unsigned int num_irq);
 
 int prepare_acpi(struct domain *d, struct kernel_info *kinfo);
 
