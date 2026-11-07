@@ -166,8 +166,10 @@ static void geni_uart_interrupt(int irq, void *data)
     geni_write(uart, SE_GENI_M_IRQ_CLEAR, m_status);
     geni_write(uart, SE_GENI_S_IRQ_CLEAR, s_status);
 
+    /* serial_rx_interrupt() takes one character: empty the FIFO. */
     if ( s_status & (S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN) )
-        serial_rx_interrupt(port);
+        while ( geni_read(uart, SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC )
+            serial_rx_interrupt(port);
 }
 
 static void __init geni_uart_init_postirq(struct serial_port *port)
