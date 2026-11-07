@@ -154,6 +154,9 @@ static int __init make_gicv3_domU_node(struct kernel_info *kinfo)
 
 int __init make_intc_domU_node(struct kernel_info *kinfo)
 {
+    /* Xen's own GIC node for the guest uses three cells */
+    kinfo->intc_cells = 3;
+
     switch ( kinfo->bd.d->arch.vgic.version )
     {
 #ifdef CONFIG_GICV3
@@ -198,12 +201,7 @@ static int __init make_vpl011_uart_node(struct kernel_info *kinfo)
 
     set_interrupt(intr, d->arch.vpl011.virq, 0xf, DT_IRQ_TYPE_LEVEL_HIGH);
 
-    res = fdt_property(fdt, "interrupts", intr, sizeof (intr));
-    if ( res )
-        return res;
-
-    res = fdt_property_cell(fdt, "interrupt-parent",
-                            kinfo->phandle_intc);
+    res = fdt_property_interrupts(kinfo, &intr, 1);
     if ( res )
         return res;
 
