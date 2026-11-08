@@ -482,26 +482,16 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
     const struct dt_property *prop, *status = NULL;
     int res = 0;
     int had_dom0_bootargs = 0;
-    struct dt_device_node *iommu_node;
 
     if ( kinfo->bd.cmdline && kinfo->bd.cmdline[0] )
         bootargs = &kinfo->bd.cmdline[0];
 
     /*
-     * We always skip the IOMMU device when creating DT for hwdom if there is
-     * an appropriate driver for it in Xen (device_get_class(iommu_node)
-     * returns DEVICE_IOMMU).
-     * We should also skip the IOMMU specific properties of the master device
-     * behind that IOMMU in order to avoid exposing an half complete IOMMU
-     * bindings to hwdom.
-     * Use "iommu_node" as an indicator of the master device which properties
-     * should be skipped.
+     * The IOMMU specific properties of a master ("iommus", "iommu-map")
+     * are kept: the hwdom gets the IOMMU node itself disabled (see
+     * make_disabled_iommu_node()), so the binding stays complete, and
+     * drivers read their stream IDs from it.
      */
-    iommu_node = dt_parse_phandle(node, "iommus", 0);
-    if ( !iommu_node )
-        iommu_node = dt_parse_phandle(node, "iommu-map", 1);
-    if ( iommu_node && device_get_class(iommu_node) != DEVICE_IOMMU )
-        iommu_node = NULL;
 
     dt_for_each_property_node (node, prop)
     {
@@ -558,19 +548,6 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
         {
             status = prop;
             continue;
-        }
-
-        if ( iommu_node )
-        {
-            /* Don't expose IOMMU specific properties to hwdom */
-            if ( dt_property_name_is_equal(prop, "iommus") )
-                continue;
-
-            if ( dt_property_name_is_equal(prop, "iommu-map") )
-                continue;
-
-            if ( dt_property_name_is_equal(prop, "iommu-map-mask") )
-                continue;
         }
 
         res = fdt_property(kinfo->fdt, prop->name, prop_data, prop_len);
@@ -1522,6 +1499,42 @@ int __init make_timer_node(const struct kernel_info *kinfo)
     return res;
 }
 
+/*
+ * Describe an IOMMU to the hardware domain without giving it the device:
+ * the node with its properties, "status" set to "disabled", and none of
+ * its MMIO or interrupts mapped. Masters keep pointing at it, and the
+ * hardware domain's OS neither probes it nor waits for it.
+ */
+static int __init make_disabled_iommu_node(const struct kernel_info *kinfo,
+                                           const struct dt_device_node *node)
+{
+    const struct dt_property *prop;
+    const char *name = strrchr(dt_node_full_name(node), '/');
+    int res;
+
+    name = name ? name + 1 : dt_node_full_name(node);
+
+    res = fdt_begin_node(kinfo->fdt, name);
+    if ( res )
+        return res;
+
+    dt_for_each_property_node (node, prop)
+    {
+        if ( dt_property_name_is_equal(prop, "status") )
+            continue;
+
+        res = fdt_property(kinfo->fdt, prop->name, prop->value, prop->length);
+        if ( res )
+            return res;
+    }
+
+    res = fdt_property_string(kinfo->fdt, "status", "disabled");
+    if ( res )
+        return res;
+
+    return fdt_end_node(kinfo->fdt);
+}
+
 static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
                               struct dt_device_node *node,
                               p2m_type_t p2mt)
@@ -1590,20 +1603,20 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
     if ( dt_match_node(timer_matches, node) )
         return make_timer_node(kinfo);
 
+    /*
+     * An IOMMU, whether Xen drives it or not, is not passed through to the
+     * hwdom; the hwdom only sees it disabled.
+     */
+    if ( device_get_class(node) == DEVICE_IOMMU )
+    {
+        dt_dprintk(" IOMMU, describe it disabled\n");
+        return make_disabled_iommu_node(kinfo, node);
+    }
+
     /* Skip nodes used by Xen */
     if ( dt_device_used_by(node) == DOMID_XEN )
     {
         dt_dprintk("  Skip it (used by Xen)\n");
-        return 0;
-    }
-
-    /*
-     * Even if the IOMMU device is not used by Xen, it should not be
-     * passthrough to hwdom.
-     */
-    if ( device_get_class(node) == DEVICE_IOMMU )
-    {
-        dt_dprintk(" IOMMU, skip it\n");
         return 0;
     }
 
