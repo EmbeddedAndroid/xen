@@ -764,10 +764,14 @@ static int __init handle_pci_range(const struct dt_device_node *dev,
 static int __init find_memory_holes(const struct kernel_info *kinfo,
                                     struct membanks *ext_regions)
 {
+    const struct membanks *host_mem[] = {
+        bootinfo_get_mem(),
+        bootinfo_get_reserved_mem(),
+    };
     struct dt_device_node *np;
     struct rangeset *mem_holes;
     paddr_t start, end;
-    unsigned int i;
+    unsigned int i, j;
     int res;
 
     dt_dprintk("Find memory holes for extended regions\n");
@@ -854,6 +858,33 @@ static int __init find_memory_holes(const struct kernel_info *kinfo,
         res = rangeset_subtract(mem_holes, kinfo->xen_reg_assigned);
         if ( res )
             goto out;
+    }
+
+    /*
+     * Remove the host RAM and reserved memory as Xen found them. On an EFI
+     * boot they come from the EFI memory map, and the memory nodes of the
+     * device tree may be empty (see above), so the loop above does not
+     * cover them.
+     */
+    for ( j = 0; j < ARRAY_SIZE(host_mem); j++ )
+    {
+        for ( i = 0; i < host_mem[j]->nr_banks; i++ )
+        {
+            start = host_mem[j]->bank[i].start;
+            end = start + host_mem[j]->bank[i].size;
+            if ( end <= start )
+                continue;
+
+            res = rangeset_remove_range(mem_holes, PFN_DOWN(start),
+                                        PFN_DOWN(end - 1));
+            if ( res )
+            {
+                printk(XENLOG_ERR
+                       "Failed to remove: %#"PRIpaddr"->%#"PRIpaddr"\n",
+                       start, end);
+                goto out;
+            }
+        }
     }
 
     start = 0;
