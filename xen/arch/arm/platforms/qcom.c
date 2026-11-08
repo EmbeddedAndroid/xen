@@ -288,6 +288,71 @@ static int qcom_pdc_pin_to_spi(const struct dt_device_node *pdc,
     return -ENOENT;
 }
 
+/*
+ * GPIO wakeup interrupts reach the PDC through the TLMM, which the hardware
+ * domain maps to PDC pins at run time from a per-SoC table, so the device
+ * tree names neither the pin nor its SPI. Route every other SPI the PDC
+ * drives to the hardware domain without a trigger: the hardware domain
+ * programs it when it enables the interrupt (irq_type_set_by_domain()).
+ * SPIs a node names at the GIC are left to the generic code, and SPIs Xen
+ * uses are skipped.
+ */
+static void __init qcom_route_pdc_spis(struct domain *d,
+                                       const struct dt_device_node *pdc,
+                                       unsigned long *routed)
+{
+    const struct dt_device_node *np;
+    const __be32 *cells;
+    unsigned int i, nr = 0;
+    u32 len;
+
+    dt_for_each_device_node ( dt_host, np )
+    {
+        unsigned int j, nirq = dt_number_of_irq(np);
+
+        for ( j = 0; j < nirq; j++ )
+        {
+            struct dt_raw_irq rirq;
+            struct dt_irq dirq;
+
+            if ( !dt_device_get_raw_irq(np, j, &rirq) &&
+                 !dt_irq_translate(&rirq, &dirq) && dirq.irq < NR_IRQS )
+                __set_bit(dirq.irq, routed);
+        }
+    }
+
+    cells = dt_get_property(pdc, "qcom,pdc-ranges", &len);
+    if ( !cells || len % (3 * sizeof(*cells)) )
+        return;
+
+    for ( i = 0; i < len / sizeof(*cells); i += 3 )
+    {
+        uint32_t spi = be32_to_cpu(cells[i + 1]);
+        uint32_t count = be32_to_cpu(cells[i + 2]);
+        uint32_t n;
+
+        for ( n = 0; n < count; n++ )
+        {
+            unsigned int irq = NR_LOCAL_IRQS + spi + n;
+            int rc;
+
+            if ( irq >= NR_IRQS )
+                break;
+            if ( test_and_set_bit(irq, routed) || irq_to_desc(irq)->action )
+                continue;
+
+            rc = map_irq_to_domain(d, irq, true, "pdc");
+            if ( rc )
+                printk(XENLOG_WARNING "qcom: unable to route PDC SPI %u to %pd: %d\n",
+                       irq, d, rc);
+            else
+                nr++;
+        }
+    }
+
+    printk(XENLOG_INFO "qcom: routed %u untyped PDC SPIs to %pd\n", nr, d);
+}
+
 static int __init qcom_route_pdc_irqs(struct domain *d)
 {
     const struct dt_device_node *pdc;
@@ -344,6 +409,8 @@ static int __init qcom_route_pdc_irqs(struct domain *d)
                        dt_node_full_name(np), irq, d, rc);
         }
     }
+
+    qcom_route_pdc_spis(d, pdc, routed);
 
     return 0;
 }
