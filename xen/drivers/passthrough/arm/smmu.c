@@ -444,6 +444,11 @@ enum arm_smmu_s2cr_type {
 	S2CR_TYPE_FAULT,
 };
 
+#define S2CR_SHCFG_SHIFT		8
+#define S2CR_SHCFG_IS			2
+#define S2CR_MTCFG			(1U << 11)
+#define S2CR_MEMATTR_SHIFT		12
+#define S2CR_MEMATTR_OIWB		0xf
 #define S2CR_PRIVCFG_SHIFT		24
 #define S2CR_PRIVCFG_MASK		0x3
 enum arm_smmu_s2cr_privcfg {
@@ -594,6 +599,7 @@ struct arm_smmu_s2cr {
 	enum arm_smmu_s2cr_type		type;
 	enum arm_smmu_s2cr_privcfg	privcfg;
 	u8				cbndx;
+	bool				coherent;
 };
 
 #define s2cr_init_val (struct arm_smmu_s2cr){				\
@@ -1570,6 +1576,17 @@ static void arm_smmu_write_s2cr(struct arm_smmu_device *smmu, int idx)
 		  (s2cr->cbndx & S2CR_CBNDX_MASK) << S2CR_CBNDX_SHIFT |
 		  (s2cr->privcfg & S2CR_PRIVCFG_MASK) << S2CR_PRIVCFG_SHIFT;
 
+	/*
+	 * Xen translates at stage 2 only, and stage 2 cannot make a
+	 * transaction more cacheable than it arrives. A master that the
+	 * device tree declares dma-coherent may rely on the stage 1
+	 * attributes an OS would give it, so override its incoming
+	 * attributes to Normal WB, inner shareable, as stage 1 would.
+	 */
+	if (s2cr->type == S2CR_TYPE_TRANS && s2cr->coherent)
+		reg |= S2CR_SHCFG_IS << S2CR_SHCFG_SHIFT | S2CR_MTCFG |
+		       S2CR_MEMATTR_OIWB << S2CR_MEMATTR_SHIFT;
+
 	writel_relaxed(reg, ARM_SMMU_GR0(smmu) + ARM_SMMU_GR0_S2CR(idx));
 }
 
@@ -1684,22 +1701,27 @@ out_err:
 }
 
 static int arm_smmu_domain_add_master(struct arm_smmu_domain *smmu_domain,
-				      struct arm_smmu_master_cfg *cfg)
+				      struct arm_smmu_master_cfg *cfg,
+				      struct device *dev)
 {
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
 	struct arm_smmu_s2cr *s2cr = smmu->s2crs;
 	enum arm_smmu_s2cr_type type = S2CR_TYPE_TRANS;
 	u8 cbndx = smmu_domain->cfg.cbndx;
+	bool coherent = dt_property_read_bool(dev_get_dev_node(dev),
+					      "dma-coherent");
 	int i, idx;
 	struct iommu_fwspec *fwspec = arm_smmu_get_fwspec(cfg);
 
 	for_each_cfg_sme(cfg, i, idx, fwspec->num_ids) {
-		if (type == s2cr[idx].type && cbndx == s2cr[idx].cbndx)
+		if (type == s2cr[idx].type && cbndx == s2cr[idx].cbndx &&
+		    coherent == s2cr[idx].coherent)
 			continue;
 
 		s2cr[idx].type = type ;
 		s2cr[idx].privcfg = S2CR_PRIVCFG_DEFAULT;
 		s2cr[idx].cbndx = cbndx;
+		s2cr[idx].coherent = coherent;
 		arm_smmu_write_s2cr(smmu, idx);
 	}
 	return 0;
@@ -1764,7 +1786,7 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 	if (!cfg)
 		return -ENODEV;
 
-	return arm_smmu_domain_add_master(smmu_domain, cfg);
+	return arm_smmu_domain_add_master(smmu_domain, cfg, dev);
 }
 
 static void arm_smmu_detach_dev(struct iommu_domain *domain, struct device *dev)
