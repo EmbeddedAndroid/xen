@@ -34,11 +34,13 @@
 #define   FORCE_DEFAULT                 BIT(0, U)
 #define SE_GENI_STATUS                  0x040
 #define   M_GENI_CMD_ACTIVE             BIT(0, U)
+#define   S_GENI_CMD_ACTIVE             BIT(12, U)
 #define SE_GENI_TX_PACKING_CFG0         0x260
 #define SE_GENI_TX_PACKING_CFG1         0x264
 #define SE_UART_TX_TRANS_LEN            0x270
 #define SE_GENI_RX_PACKING_CFG0         0x284
 #define SE_GENI_RX_PACKING_CFG1         0x288
+#define SE_UART_RX_STALE_CNT            0x294
 #define SE_GENI_M_CMD0                  0x600
 #define   M_OPCODE_SHIFT                27
 #define   UART_START_TX                 0x1
@@ -62,6 +64,9 @@
 #define SE_GENI_S_IRQ_CLEAR             0x648
 #define   S_CMD_DONE_EN                 BIT(0, U)
 #define   S_CMD_ABORT_EN                BIT(5, U)
+#define   S_GP_IRQ_MASK                 (0xfU << 9)
+#define   S_RX_FIFO_RD_ERR_EN           BIT(24, U)
+#define   S_RX_FIFO_WR_ERR_EN           BIT(25, U)
 #define   S_RX_FIFO_WATERMARK_EN        BIT(26, U)
 #define   S_RX_FIFO_LAST_EN             BIT(27, U)
 #define SE_GENI_TX_FIFOn                0x700
@@ -69,11 +74,28 @@
 #define SE_GENI_RX_FIFO_STATUS          0x804
 #define   RX_FIFO_WC                    0x01ffffff
 #define SE_GENI_TX_WATERMARK_REG        0x80c
+#define SE_GENI_RX_WATERMARK_REG        0x810
+#define SE_GENI_RX_RFR_WATERMARK_REG    0x814
+#define SE_HW_PARAM_1                   0xe28
+#define   RX_FIFO_DEPTH_SHIFT           16
+#define   RX_FIFO_DEPTH_MASK            0x3fU
 
 /* geni_se_config_packing(): 8 bits, one character per FIFO word, LSB first */
 #define GENI_PACKING_CFG0_8BIT          0xf
 /* TX watermark in FIFO words (Linux and U-Boot DEF_TX_WM) */
 #define GENI_TX_WATERMARK               2
+/*
+ * RX as Linux qcom_geni_serial_port_setup(): interrupt at 2 words, RFR at
+ * depth - 2, and a stale timeout of 16 characters of 10 bits, after which
+ * RX_FIFO_LAST reports what is left below the watermark.
+ */
+#define GENI_RX_WATERMARK               2
+#define GENI_RX_STALE_CNT               (10 * 16)
+#define GENI_RX_FIFO_DEPTH_DEFAULT      16
+#define GENI_S_IRQS                     (S_RX_FIFO_WATERMARK_EN | \
+                                         S_RX_FIFO_LAST_EN | S_CMD_DONE_EN | \
+                                         S_CMD_ABORT_EN | S_RX_FIFO_WR_ERR_EN | \
+                                         S_RX_FIFO_RD_ERR_EN | S_GP_IRQ_MASK)
 
 #define GENI_POLL_TIMEOUT_US    20000U
 #define GENI_POLL_STEP_US       10U
@@ -82,6 +104,7 @@ static struct geni_uart {
     unsigned int irq;
     void __iomem *regs;
     struct irqaction irqaction;
+    unsigned int rx_restarts;
 } geni_com;
 
 static uint32_t geni_read(const struct geni_uart *uart, unsigned int off)
@@ -134,6 +157,17 @@ static void geni_abort_rx(const struct geni_uart *uart)
 
 static void geni_start_rx(const struct geni_uart *uart)
 {
+    unsigned int depth = (geni_read(uart, SE_HW_PARAM_1) >> RX_FIFO_DEPTH_SHIFT) &
+                         RX_FIFO_DEPTH_MASK;
+
+    if ( depth <= GENI_RX_WATERMARK )
+        depth = GENI_RX_FIFO_DEPTH_DEFAULT;
+
+    geni_write(uart, SE_UART_RX_STALE_CNT, GENI_RX_STALE_CNT);
+    geni_write(uart, SE_GENI_RX_WATERMARK_REG, GENI_RX_WATERMARK);
+    geni_write(uart, SE_GENI_RX_RFR_WATERMARK_REG, depth - 2);
+    geni_write(uart, SE_GENI_S_IRQ_CLEAR, GENI_S_IRQS);
+    geni_write(uart, SE_GENI_S_IRQ_EN, GENI_S_IRQS);
     geni_write(uart, SE_GENI_S_CMD0, UART_START_READ << S_OPCODE_SHIFT);
 }
 
@@ -170,6 +204,22 @@ static void geni_uart_interrupt(int irq, void *data)
     if ( s_status & (S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN) )
         while ( geni_read(uart, SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC )
             serial_rx_interrupt(port);
+
+    /*
+     * The read command ends on an abort, a break or a FIFO error, and
+     * nothing is received until it is issued again.
+     */
+    if ( (s_status & (S_CMD_DONE_EN | S_CMD_ABORT_EN)) ||
+         !(geni_read(uart, SE_GENI_STATUS) & S_GENI_CMD_ACTIVE) )
+    {
+        serial_rx_interrupt(port);
+        uart->rx_restarts++;
+        if ( printk_ratelimit() )
+            printk(XENLOG_WARNING
+                   "geni-uart: RX restarted (s_irq %08x, %u so far)\n",
+                   s_status, uart->rx_restarts);
+        geni_start_rx(uart);
+    }
 }
 
 static void __init geni_uart_init_postirq(struct serial_port *port)
@@ -186,9 +236,14 @@ static void __init geni_uart_init_postirq(struct serial_port *port)
         return;
     }
 
+    printk(XENLOG_INFO
+           "geni-uart: RX left by firmware: watermark %u rfr %u stale %u s_irq_en %08x\n",
+           geni_read(uart, SE_GENI_RX_WATERMARK_REG),
+           geni_read(uart, SE_GENI_RX_RFR_WATERMARK_REG),
+           geni_read(uart, SE_UART_RX_STALE_CNT),
+           geni_read(uart, SE_GENI_S_IRQ_EN));
+
     geni_abort_rx(uart);
-    geni_write(uart, SE_GENI_S_IRQ_EN,
-               S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN);
     geni_write(uart, SE_GENI_M_IRQ_EN,
                M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
     geni_start_rx(uart);
