@@ -3013,15 +3013,19 @@ static __init int arm_smmu_dt_init(struct dt_device_node *dev,
 	int rc;
 	const struct arm_smmu_device *smmu;
 
-	/*
-	 * Even if the device can't be initialized, we don't want to
-	 * give the SMMU device to dom0.
-	 */
 	dt_device_set_used_by(dev, DOMID_XEN);
 
 	rc = arm_smmu_device_dt_probe(dev);
-	if (rc)
+	if (rc) {
+		/*
+		 * Xen does not drive this SMMU (for instance one without the
+		 * translation stage Xen needs). Leave it to the hardware
+		 * domain, which gets it only if it is direct mapped (see
+		 * handle_node()); its masters stay unprotected.
+		 */
+		dt_device_set_used_by(dev, hardware_domid);
 		return rc;
+	}
 
 	iommu_set_ops(&arm_smmu_iommu_ops);
 

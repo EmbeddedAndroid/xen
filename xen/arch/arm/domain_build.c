@@ -1604,10 +1604,14 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
         return make_timer_node(kinfo);
 
     /*
-     * An IOMMU, whether Xen drives it or not, is not passed through to the
-     * hwdom; the hwdom only sees it disabled.
+     * An IOMMU that Xen drives is described to the hwdom disabled. One that
+     * Xen does not drive is passed through like any other device, but only
+     * to a direct-mapped hwdom: it programs the IOMMU with its guest
+     * physical addresses, which are only host physical addresses there.
      */
-    if ( device_get_class(node) == DEVICE_IOMMU )
+    if ( device_get_class(node) == DEVICE_IOMMU &&
+         (dt_device_used_by(node) == DOMID_XEN ||
+          !is_domain_direct_mapped(d)) )
     {
         dt_dprintk(" IOMMU, describe it disabled\n");
         return make_disabled_iommu_node(kinfo, node);
