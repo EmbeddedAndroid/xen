@@ -77,6 +77,9 @@
 /* Negotiated FF-A version to use with the SPMC, 0 if not there or supported */
 uint32_t __ro_after_init ffa_fw_version;
 
+/* Endpoint ID of the SPMC, or -1 if the firmware does not report it */
+static int __ro_after_init ffa_spmc_id = -1;
+
 /* Features supported by the SPMC or secure world when present */
 DECLARE_BITMAP(ffa_fw_abi_supported, FFA_ABI_BITMAP_SIZE);
 
@@ -750,6 +753,16 @@ static bool ffa_probe_fw(void)
         set_bit(FFA_ABI_BITNUM(FFA_RX_ACQUIRE), ffa_fw_abi_supported);
     }
 
+    if ( ffa_abi_supported(FFA_SPM_ID_GET) )
+    {
+        const struct arm_smccc_1_2_regs arg = { .a0 = FFA_SPM_ID_GET };
+        struct arm_smccc_1_2_regs resp;
+
+        arm_smccc_1_2_smc(&arg, &resp);
+        if ( resp.a0 == FFA_SUCCESS_32 )
+            ffa_spmc_id = resp.a2 & GENMASK(15, 0);
+    }
+
     if ( !ffa_rxtx_spmc_init() )
     {
         printk(XENLOG_ERR "ffa: Error during RXTX buffer init\n");
@@ -767,10 +780,54 @@ err_rxtx_destroy:
     ffa_rxtx_spmc_destroy();
 err_no_fw:
     ffa_fw_version = 0;
+    ffa_spmc_id = -1;
     bitmap_zero(ffa_fw_abi_supported, FFA_ABI_BITMAP_SIZE);
     printk(XENLOG_WARNING "ARM FF-A No firmware support\n");
 
     return false;
+}
+
+/*
+ * Boot time only: endpoint 0 is not serialised between callers.
+ * -EOPNOTSUPP: no SPMC, or it does not take the request.
+ */
+int __init ffa_spmc_direct_req(struct arm_smccc_1_2_regs *req,
+                               struct arm_smccc_1_2_regs *resp)
+{
+    unsigned int retry;
+
+    if ( !ffa_fw_version || ffa_spmc_id < 0 ||
+         !ffa_fw_supports_fid(FFA_MSG_SEND_DIRECT_REQ_32) )
+        return -EOPNOTSUPP;
+
+    req->a0 = FFA_MSG_SEND_DIRECT_REQ_32;
+    req->a1 = ffa_spmc_id;
+    req->a2 = 0;
+
+    for ( retry = 0; retry < 10; retry++ )
+    {
+        arm_smccc_1_2_smc(req, resp);
+
+        if ( resp->a0 == FFA_MSG_SEND_DIRECT_RESP_32 )
+            return ((resp->a1 >> 16) & GENMASK(15, 0)) == ffa_spmc_id ?
+                   0 : -EIO;
+        if ( resp->a0 != FFA_ERROR )
+            return -EIO;
+
+        switch ( (int32_t)resp->a2 )
+        {
+        case FFA_RET_NOT_SUPPORTED:
+        case FFA_RET_INVALID_PARAMETERS:
+            return -EOPNOTSUPP;
+        case FFA_RET_BUSY:
+        case FFA_RET_RETRY:
+            continue;
+        default:
+            return -EIO;
+        }
+    }
+
+    return -EBUSY;
 }
 
 static bool ffa_probe_vm_to_vm(void)
