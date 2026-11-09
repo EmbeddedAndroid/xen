@@ -254,6 +254,9 @@ int iommu_release_dt_devices(struct domain *d);
  */
 int iommu_add_dt_device(struct dt_device_node *np);
 
+/* Whether no domain may get the master interface @args describes */
+bool iommu_dt_xlate_reserved(const struct dt_phandle_args *args);
+
 /*
  * Fills out the device's IOMMU fwspec with IOMMU ids from the DT.
  * Ids are specified in the iommu-map property in the host bridge node.
@@ -295,6 +298,11 @@ static inline int iommu_add_dt_device(struct dt_device_node *np)
      * iommu_add_dt_device())
      */
     return 1;
+}
+
+static inline bool iommu_dt_xlate_reserved(const struct dt_phandle_args *args)
+{
+    return false;
 }
 
 static inline int iommu_release_dt_devices(struct domain *d)
@@ -384,6 +392,11 @@ struct iommu_ops {
      * that device (device IDs, etc).
      */
     int (*dt_xlate)(device_t *dev, const struct dt_phandle_args *args);
+    /*
+     * Whether the IOMMU keeps the master interface described by @args from
+     * every domain, for instance because the firmware maps it itself.
+     */
+    bool (*dt_xlate_reserved)(const struct dt_phandle_args *args);
 #endif
     /* Inhibit all interrupt generation, to be used at shutdown. */
     void (*quiesce)(void);

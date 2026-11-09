@@ -16,6 +16,8 @@ SMMU it probes and:
  - drops firmware streams from every master that lists them ("stream
    0x... belongs to the secure firmware, not mapped"), so no domain gets
    an SMR for them;
+ - leaves those specifiers out of the master's "iommus" in the hardware
+   domain's device tree, dropping the property when none remain;
  - panics if it cannot fence the slice (not at the top of the ranges,
    firmware VMIDs not above Xen's) or does not drive that SMMU at all.
 
@@ -23,4 +25,6 @@ Without an SPMC, or when OP-TEE declares no slice for an SMMU, Xen logs
 "no secure firmware slice" and runs the SMMU as its own.
 
 Not covered: iommu=no (the hardware domain gets every SMMU), TEE
-mediators other than FF-A, and the firmware's memory itself.
+mediators other than FF-A, "iommu-map" in the hardware domain's device
+tree (the streams themselves are still refused), and the firmware's
+memory itself.

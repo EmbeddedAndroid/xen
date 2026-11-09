@@ -255,6 +255,16 @@ int iommu_remove_dt_device(struct dt_device_node *np)
     return rc;
 }
 
+bool iommu_dt_xlate_reserved(const struct dt_phandle_args *args)
+{
+    const struct iommu_ops *ops = iommu_get_ops();
+
+    if ( !iommu_enabled || !ops || !ops->dt_xlate_reserved )
+        return false;
+
+    return ops->dt_xlate_reserved(args);
+}
+
 int iommu_add_dt_device(struct dt_device_node *np)
 {
     const struct iommu_ops *ops = iommu_get_ops();
