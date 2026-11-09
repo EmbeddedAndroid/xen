@@ -55,6 +55,9 @@ static bool __hwdom_initdata iommu_hwdom_none;
 bool __hwdom_initdata iommu_hwdom_strict;
 bool __read_mostly iommu_hwdom_passthrough;
 bool __hwdom_initdata iommu_hwdom_inclusive;
+#ifdef CONFIG_ARM
+bool __read_mostly iommu_hwdom_nested;
+#endif
 int8_t __hwdom_initdata iommu_hwdom_reserved = -1;
 
 #ifndef iommu_hap_pt_share
@@ -170,6 +173,10 @@ static int __init cf_check parse_dom0_iommu_param(const char *s)
             iommu_hwdom_inclusive = val;
         else if ( (val = parse_boolean("map-reserved", s, ss)) >= 0 )
             iommu_hwdom_reserved = val;
+#ifdef CONFIG_ARM
+        else if ( (val = parse_boolean("nested", s, ss)) >= 0 )
+            iommu_hwdom_nested = val;
+#endif
         else if ( !cmdline_strcmp(s, "none") )
             iommu_hwdom_none = true;
         else

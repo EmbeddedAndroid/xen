@@ -265,6 +265,18 @@ bool iommu_dt_xlate_reserved(const struct dt_phandle_args *args)
     return ops->dt_xlate_reserved(args);
 }
 
+int iommu_dt_hwdom_nested(struct domain *d, const struct dt_device_node *np)
+{
+    const struct iommu_ops *ops = iommu_get_ops();
+
+    if ( !iommu_hwdom_nested || !is_iommu_enabled(d) ||
+         !is_hardware_domain(d) || !is_domain_direct_mapped(d) ||
+         !ops || !ops->dt_hwdom_nested )
+        return 0;
+
+    return ops->dt_hwdom_nested(d, np);
+}
+
 int iommu_add_dt_device(struct dt_device_node *np)
 {
     const struct iommu_ops *ops = iommu_get_ops();
