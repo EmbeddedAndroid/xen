@@ -968,7 +968,8 @@ Controls for the dom0 IOMMU setup.
     With it, a direct-mapped dom0 drives stage 1 of each SMMUv2 that supports
     nested translation, on top of Xen's stage 2 of dom0, instead of getting
     the SMMU described disabled. dom0's drivers then get IOMMU domains as on
-    bare metal while its DMA stays confined to its own memory.
+    bare metal while its DMA stays confined to its own memory. See
+    `docs/misc/arm/smmu-hwdom-nested.txt`.
 
 *   The `none` option is intended for development purposes only, and skips
     certain safety checks pertaining to the correct IOMMU configuration for
