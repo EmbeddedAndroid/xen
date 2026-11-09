@@ -57,6 +57,8 @@
 #include <asm/iommu_fwspec.h>
 #include <asm/platform.h>
 
+#include "smmu-fw.h"
+
 /* Xen: The below defines are redefined within the file. Undef it */
 #undef SCTLR_AFE
 #undef SCTLR_TRE
@@ -630,6 +632,7 @@ struct arm_smmu_device {
 	struct device			*dev;
 
 	void __iomem			*base;
+	paddr_t				phys;
 	unsigned long			size;
 	unsigned long			pgshift;
 
@@ -645,6 +648,7 @@ struct arm_smmu_device {
 	enum arm_smmu_arch_version	version;
 
 	u32				num_context_banks;
+	u32				num_hw_context_banks;
 	u32				num_s2_context_banks;
 	DECLARE_BITMAP(context_map, ARM_SMMU_MAX_CBS);
 	atomic_t			irptndx;
@@ -667,6 +671,10 @@ struct arm_smmu_device {
 
 	struct list_head		list;
 	struct rb_root			masters;
+
+	/* Xen: SMRs and context banks the secure firmware programs */
+	bool				has_fw_slice;
+	struct smmu_fw_slice		fw_slice;
 };
 
 struct arm_smmu_cfg {
@@ -832,6 +840,23 @@ static int arm_smmu_dt_add_device_legacy(struct arm_smmu_device *smmu,
 	{
 		/* Xen: Let Xen know that the device is protected by an SMMU */
 		dt_device_set_protected(dev_node, true);
+	}
+
+	/* Xen: never give a domain a stream the firmware maps itself */
+	if (smmu->has_fw_slice) {
+		unsigned int j = 0;
+
+		for (i = 0; i < fwspec->num_ids; ++i) {
+			if (smmu_fw_slice_owns(&smmu->fw_slice, fwspec->ids[i],
+					       smmu->streamid_mask)) {
+				dev_notice(dev,
+					   "stream 0x%x belongs to the secure firmware, not mapped\n",
+					   fwspec->ids[i]);
+				continue;
+			}
+			fwspec->ids[j++] = fwspec->ids[i];
+		}
+		fwspec->num_ids = j;
 	}
 
 	for (i = 0; i < fwspec->num_ids; ++i) {
@@ -2279,6 +2304,45 @@ static int arm_smmu_id_size_to_bits(int size)
 	}
 }
 
+/*
+ * Xen: Keep out of the SMRs, context banks and VMIDs the secure firmware
+ * programs. Going on with a slice Xen cannot fence would hand the
+ * firmware's entries to a domain.
+ */
+static void arm_smmu_fw_slice_probe(struct arm_smmu_device *smmu)
+{
+	struct smmu_fw_slice *s = &smmu->fw_slice;
+	int ret;
+
+	ret = smmu_fw_slice_lookup(smmu->phys, s);
+	if (ret == -ENOENT || ret == -EOPNOTSUPP) {
+		dev_notice(smmu->dev, "\tno secure firmware slice (%s)\n",
+			   ret == -ENOENT ? "none declared"
+					  : "firmware does not publish slices");
+		return;
+	}
+	if (!ret)
+		ret = smmu_fw_slice_check(s, smmu->num_mapping_groups,
+					  smmu->num_context_banks,
+					  smmu->streamid_mask);
+	if (ret)
+		panic("SMMU %"PRIpaddr": cannot fence the secure firmware's slice (%d)\n",
+		      smmu->phys, ret);
+
+	smmu->has_fw_slice = true;
+	smmu->num_mapping_groups = s->smr_first;
+	smmu->num_context_banks = s->cb_first;
+	smmu->num_s2_context_banks = min(smmu->num_s2_context_banks,
+					 smmu->num_context_banks);
+
+	dev_notice(smmu->dev,
+		   "\tsecure firmware owns SMR %u-%u, CB %u-%u, VMID %u-%u, %u streams\n",
+		   s->smr_first, s->smr_first + s->smr_count - 1,
+		   s->cb_first, s->cb_first + s->cb_count - 1,
+		   s->vmid_first, s->vmid_first + s->vmid_count - 1,
+		   s->nr_streams);
+}
+
 static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 {
 	unsigned long size;
@@ -2451,6 +2515,9 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 		dev_notice(smmu->dev, "\tStage-2: %lu-bit IPA -> %lu-bit PA\n",
 			   smmu->s2_input_size, smmu->s2_output_size);
 
+	smmu->num_hw_context_banks = smmu->num_context_banks;
+	arm_smmu_fw_slice_probe(smmu);
+
 	return 0;
 }
 
@@ -2494,6 +2561,7 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
 		err = PTR_ERR(smmu->base);
 		goto out_free;
 	}
+	smmu->phys = res->addr;
 	smmu->size = resource_size(res);
 
 	if (of_property_read_u32(dev->of_node, "#global-interrupts",
@@ -2559,10 +2627,10 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
 	parse_driver_options(smmu);
 
 	if (smmu->version > ARM_SMMU_V1 &&
-	    smmu->num_context_banks != smmu->num_context_irqs) {
+	    smmu->num_hw_context_banks != smmu->num_context_irqs) {
 		dev_err(dev,
 			"found only %d context interrupt(s) but %d required\n",
-			smmu->num_context_irqs, smmu->num_context_banks);
+			smmu->num_context_irqs, smmu->num_hw_context_banks);
 		err = -ENODEV;
 		goto out_put_masters;
 	}
@@ -3017,6 +3085,16 @@ static __init int arm_smmu_dt_init(struct dt_device_node *dev,
 
 	rc = arm_smmu_device_dt_probe(dev);
 	if (rc) {
+		struct smmu_fw_slice slice;
+		paddr_t addr, size;
+		int fw = -ENOENT;
+
+		if (!dt_device_get_paddr(dev, 0, &addr, &size))
+			fw = smmu_fw_slice_lookup(addr, &slice);
+		if (fw != -ENOENT && fw != -EOPNOTSUPP)
+			panic("SMMU %"PRIpaddr": not driven by Xen but the secure firmware owns a slice of it\n",
+			      addr);
+
 		/*
 		 * Xen does not drive this SMMU (for instance one without the
 		 * translation stage Xen needs). Leave it to the hardware
