@@ -475,6 +475,61 @@ static int __init handle_linux_pci_domain(struct kernel_info *kinfo,
     return fdt_property_cell(kinfo->fdt, "linux,pci-domain", segment);
 }
 
+/*
+ * Write a master's "iommus" without the specifiers no domain may have,
+ * leaving it out when none remain. Copied unchanged if it cannot be parsed.
+ */
+static int __init write_iommus_property(struct kernel_info *kinfo,
+                                        const struct dt_device_node *node,
+                                        const struct dt_property *prop)
+{
+    const __be32 *in = prop->value;
+    unsigned int ncells = prop->length / sizeof(*in), pos = 0, out = 0, i;
+    struct dt_phandle_args args;
+    __be32 *buf;
+    int res;
+
+    buf = xmalloc_array(__be32, ncells);
+    if ( !buf )
+        return -ENOMEM;
+
+    for ( i = 0; pos < ncells; i++ )
+    {
+        unsigned int len;
+
+        if ( dt_parse_phandle_with_args(node, "iommus", "#iommu-cells", i,
+                                        &args) )
+            break;
+
+        len = 1 + args.args_count;
+        if ( pos + len > ncells )
+            break;
+
+        if ( device_get_class(args.np) == DEVICE_IOMMU &&
+             dt_device_used_by(args.np) == DOMID_XEN &&
+             iommu_dt_xlate_reserved(&args) )
+            printk(XENLOG_INFO "%s: stream specifier %u left out of iommus\n",
+                   dt_node_full_name(node), i);
+        else
+        {
+            memcpy(&buf[out], &in[pos], len * sizeof(*in));
+            out += len;
+        }
+        pos += len;
+    }
+
+    if ( !ncells || pos != ncells || prop->length % sizeof(*in) )
+        res = fdt_property(kinfo->fdt, prop->name, prop->value, prop->length);
+    else if ( out )
+        res = fdt_property(kinfo->fdt, prop->name, buf, out * sizeof(*buf));
+    else
+        res = 0;
+
+    xfree(buf);
+
+    return res;
+}
+
 static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
                                    const struct dt_device_node *node)
 {
@@ -490,7 +545,8 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
      * The IOMMU specific properties of a master ("iommus", "iommu-map")
      * are kept: the hwdom gets the IOMMU node itself disabled (see
      * make_disabled_iommu_node()), so the binding stays complete, and
-     * drivers read their stream IDs from it.
+     * drivers read their stream IDs from it. Streams no domain may have
+     * are left out of "iommus" (see write_iommus_property()).
      */
 
     dt_for_each_property_node (node, prop)
@@ -550,7 +606,10 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
             continue;
         }
 
-        res = fdt_property(kinfo->fdt, prop->name, prop_data, prop_len);
+        if ( dt_property_name_is_equal(prop, "iommus") )
+            res = write_iommus_property(kinfo, node, prop);
+        else
+            res = fdt_property(kinfo->fdt, prop->name, prop_data, prop_len);
 
         if ( res )
             return res;

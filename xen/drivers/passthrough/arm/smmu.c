@@ -1007,8 +1007,7 @@ static int arm_smmu_dt_add_device_generic(u8 devfn, struct device *dev)
 	return ret;
 }
 
-static int arm_smmu_dt_xlate_generic(struct device *dev,
-				    const struct dt_phandle_args *spec)
+static uint32_t arm_smmu_dt_fwid(const struct dt_phandle_args *spec)
 {
 	uint32_t mask, fwid = 0;
 
@@ -1020,7 +1019,24 @@ static int arm_smmu_dt_xlate_generic(struct device *dev,
 	else if (!of_property_read_u32(spec->np, "stream-match-mask", &mask))
 		fwid |= (SMR_MASK_MASK & mask) << SMR_MASK_SHIFT;
 
+	return fwid;
+}
+
+static int arm_smmu_dt_xlate_generic(struct device *dev,
+				    const struct dt_phandle_args *spec)
+{
+	uint32_t fwid = arm_smmu_dt_fwid(spec);
+
 	return iommu_fwspec_add_ids(dev, &fwid, 1);
+}
+
+static bool arm_smmu_dt_xlate_reserved(const struct dt_phandle_args *spec)
+{
+	struct arm_smmu_device *smmu = find_smmu(dt_to_dev(spec->np));
+
+	return smmu && smmu->has_fw_slice &&
+	       smmu_fw_slice_owns(&smmu->fw_slice, arm_smmu_dt_fwid(spec),
+				  smmu->streamid_mask);
 }
 
 static struct arm_smmu_device *find_smmu_for_device(struct device *dev)
@@ -3056,6 +3072,7 @@ static const struct iommu_ops arm_smmu_iommu_ops = {
     .map_page = arm_iommu_map_page,
     .unmap_page = arm_iommu_unmap_page,
     .dt_xlate = arm_smmu_dt_xlate_generic,
+    .dt_xlate_reserved = arm_smmu_dt_xlate_reserved,
 };
 
 static struct arm_smmu_device *find_smmu(const struct device *dev)
