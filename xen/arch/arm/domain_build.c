@@ -543,8 +543,8 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
 
     /*
      * The IOMMU specific properties of a master ("iommus", "iommu-map")
-     * are kept: the hwdom gets the IOMMU node itself disabled (see
-     * make_disabled_iommu_node()), so the binding stays complete, and
+     * are kept: the hwdom gets the IOMMU node itself (see
+     * make_iommu_node()), so the binding stays complete, and
      * drivers read their stream IDs from it. Streams no domain may have
      * are left out of "iommus" (see write_iommus_property()).
      */
@@ -1663,12 +1663,14 @@ int __init make_timer_node(const struct kernel_info *kinfo)
 
 /*
  * Describe an IOMMU to the hardware domain without giving it the device:
- * the node with its properties, "status" set to "disabled", and none of
- * its MMIO or interrupts mapped. Masters keep pointing at it, and the
- * hardware domain's OS neither probes it nor waits for it.
+ * the node with its properties, and none of its MMIO or interrupts
+ * mapped. Unless the IOMMU driver gave the hardware domain stage 1 of it
+ * (@disabled false), "status" is "disabled": masters keep pointing at it,
+ * and the hardware domain's OS neither probes it nor waits for it.
  */
-static int __init make_disabled_iommu_node(const struct kernel_info *kinfo,
-                                           const struct dt_device_node *node)
+static int __init make_iommu_node(const struct kernel_info *kinfo,
+                                  const struct dt_device_node *node,
+                                  bool disabled)
 {
     const struct dt_property *prop;
     const char *name = strrchr(dt_node_full_name(node), '/');
@@ -1682,7 +1684,7 @@ static int __init make_disabled_iommu_node(const struct kernel_info *kinfo,
 
     dt_for_each_property_node (node, prop)
     {
-        if ( dt_property_name_is_equal(prop, "status") )
+        if ( disabled && dt_property_name_is_equal(prop, "status") )
             continue;
 
         res = fdt_property(kinfo->fdt, prop->name, prop->value, prop->length);
@@ -1690,9 +1692,12 @@ static int __init make_disabled_iommu_node(const struct kernel_info *kinfo,
             return res;
     }
 
-    res = fdt_property_string(kinfo->fdt, "status", "disabled");
-    if ( res )
-        return res;
+    if ( disabled )
+    {
+        res = fdt_property_string(kinfo->fdt, "status", "disabled");
+        if ( res )
+            return res;
+    }
 
     return fdt_end_node(kinfo->fdt);
 }
@@ -1766,8 +1771,9 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
         return make_timer_node(kinfo);
 
     /*
-     * An IOMMU that Xen drives is described to the hwdom disabled. One that
-     * Xen does not drive is passed through like any other device, but only
+     * An IOMMU that Xen drives is described to the hwdom disabled, unless
+     * the hwdom drives stage 1 of it (dom0-iommu=nested). One that Xen
+     * does not drive is passed through like any other device, but only
      * to a direct-mapped hwdom: it programs the IOMMU with its guest
      * physical addresses, which are only host physical addresses there.
      */
@@ -1775,8 +1781,14 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
          (dt_device_used_by(node) == DOMID_XEN ||
           !is_domain_direct_mapped(d)) )
     {
-        dt_dprintk(" IOMMU, describe it disabled\n");
-        return make_disabled_iommu_node(kinfo, node);
+        res = dt_device_used_by(node) == DOMID_XEN
+              ? iommu_dt_hwdom_nested(d, node) : 0;
+        if ( res < 0 )
+            return res;
+
+        dt_dprintk(" IOMMU, describe it %s\n",
+                   res ? "for stage 1" : "disabled");
+        return make_iommu_node(kinfo, node, !res);
     }
 
     /* Skip nodes used by Xen */

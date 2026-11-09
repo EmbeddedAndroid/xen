@@ -108,6 +108,7 @@ extern bool iommu_debug;
 extern bool amd_iommu_perdev_intremap;
 
 extern bool iommu_hwdom_strict, iommu_hwdom_passthrough, iommu_hwdom_inclusive;
+extern bool iommu_hwdom_nested;
 extern int8_t iommu_hwdom_reserved;
 
 extern unsigned int iommu_dev_iotlb_timeout;
@@ -258,6 +259,16 @@ int iommu_add_dt_device(struct dt_device_node *np);
 bool iommu_dt_xlate_reserved(const struct dt_phandle_args *args);
 
 /*
+ * Give the hardware domain stage 1 of IOMMU @np on top of Xen's stage 2.
+ *
+ * Return values:
+ *  1 : done; describe @np to the hardware domain as it is
+ *  0 : the hardware domain does not drive @np
+ * <0 : error
+ */
+int iommu_dt_hwdom_nested(struct domain *d, const struct dt_device_node *np);
+
+/*
  * Fills out the device's IOMMU fwspec with IOMMU ids from the DT.
  * Ids are specified in the iommu-map property in the host bridge node.
  * More information on the iommu-map property format can be found in
@@ -303,6 +314,12 @@ static inline int iommu_add_dt_device(struct dt_device_node *np)
 static inline bool iommu_dt_xlate_reserved(const struct dt_phandle_args *args)
 {
     return false;
+}
+
+static inline int iommu_dt_hwdom_nested(struct domain *d,
+                                        const struct dt_device_node *np)
+{
+    return 0;
 }
 
 static inline int iommu_release_dt_devices(struct domain *d)
@@ -397,6 +414,8 @@ struct iommu_ops {
      * every domain, for instance because the firmware maps it itself.
      */
     bool (*dt_xlate_reserved)(const struct dt_phandle_args *args);
+    /* See iommu_dt_hwdom_nested() */
+    int (*dt_hwdom_nested)(struct domain *d, const struct dt_device_node *np);
 #endif
     /* Inhibit all interrupt generation, to be used at shutdown. */
     void (*quiesce)(void);
