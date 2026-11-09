@@ -73,6 +73,7 @@ static DEFINE_SPINLOCK(qcom_assign_lock);
 static const char * const qcom_dt_compat[] __initconst =
 {
     "qcom,nord",
+    "qcom,sa8775p",
     "qcom,sa8155p",
     NULL
 };
