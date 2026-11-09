@@ -10,6 +10,7 @@
 #include <xen/lib.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
+#include <xen/xvmalloc.h>
 
 #include <asm/smccc.h>
 #include <asm/regs.h>
@@ -87,14 +88,24 @@ struct ffa_shm_mem {
     uint64_t handle;    /* FFA_HANDLE_INVALID if not set yet */
     /* Endpoint memory access descriptor IMPDEF value (FF-A 1.2). */
     uint64_t impdef[2];
+    /*
+     * Lent pages are out of the lender's p2m while the SPMC holds them;
+     * lend_type is what they are mapped back as. Reserved memory of a
+     * direct-mapped hardware domain (p2m_mmio_direct_c) has no page
+     * reference taken.
+     */
+    bool lend;
+    p2m_type_t lend_type;
+    gfn_t *gfns;
     unsigned int page_count;
     struct page_info *pages[];
 };
 
-static int32_t ffa_spmc_share(uint32_t tot_len, uint64_t *handle)
+static int32_t ffa_spmc_share(uint32_t fid, uint32_t tot_len,
+                              uint64_t *handle)
 {
     struct arm_smccc_1_2_regs arg = {
-        .a0 = FFA_MEM_SHARE_64,
+        .a0 = fid,
         .a1 = tot_len,
         .a2 = tot_len,
         .a3 = 0,
@@ -138,6 +149,77 @@ static int32_t ffa_spmc_reclaim(struct ffa_shm_mem *shm, uint32_t flags)
 }
 
 /*
+ * A page to lend: normal RAM of the lender (referenced like a shared page)
+ * or reserved memory that a direct-mapped hardware domain has 1:1, which
+ * is RAM Xen knows (mfn_valid) but not a page the domain owns. Every page
+ * of one lend must be of the same kind, the type it is mapped back as.
+ */
+static int32_t get_lend_page(struct domain *d, struct ffa_shm_mem *shm,
+                             unsigned int idx, gfn_t gfn)
+{
+    struct page_info *pg;
+    p2m_type_t t;
+    mfn_t mfn = INVALID_MFN;
+
+    pg = get_page_from_gfn(d, gfn_x(gfn), &t, P2M_ALLOC);
+    if ( pg && t != p2m_ram_rw )
+    {
+        put_page(pg);
+        return FFA_RET_DENIED;
+    }
+    if ( !pg )
+    {
+        if ( !is_hardware_domain(d) || !is_domain_direct_mapped(d) )
+            return FFA_RET_DENIED;
+        mfn = p2m_lookup(d, gfn, &t);
+        if ( t != p2m_mmio_direct_c || !mfn_eq(mfn, _mfn(gfn_x(gfn))) ||
+             !mfn_valid(mfn) )
+            return FFA_RET_DENIED;
+    }
+
+    if ( idx && t != shm->lend_type )
+    {
+        if ( pg )
+            put_page(pg);
+        return FFA_RET_DENIED;
+    }
+    shm->lend_type = t;
+    shm->pages[idx] = pg ?: mfn_to_page(mfn);
+
+    return FFA_RET_OK;
+}
+
+/* Remove the lent pages from the lender's p2m, or put them back */
+static int lend_map(struct domain *d, struct ffa_shm_mem *shm, bool map)
+{
+    unsigned int n, run;
+    int rc = 0;
+
+    for ( n = 0; n < shm->page_count; n += run )
+    {
+        mfn_t mfn = page_to_mfn(shm->pages[n]);
+
+        for ( run = 1; n + run < shm->page_count; run++ )
+            if ( !gfn_eq(shm->gfns[n + run], gfn_add(shm->gfns[n], run)) ||
+                 !mfn_eq(page_to_mfn(shm->pages[n + run]), mfn_add(mfn, run)) )
+                break;
+
+        if ( map )
+            rc = map_regions_p2mt(d, shm->gfns[n], run, mfn, shm->lend_type);
+        else
+            rc = unmap_regions_p2mt(d, shm->gfns[n], run, mfn);
+        if ( rc )
+            break;
+    }
+
+    if ( rc && !map )
+        /* Put back what was taken away before the failure */
+        lend_map(d, shm, true);
+
+    return rc;
+}
+
+/*
  * Gets all page and assigns them to the supplied shared memory object. If
  * this function fails then the caller is still expected to call
  * put_shm_pages() as a cleanup.
@@ -154,6 +236,7 @@ static int32_t get_shm_pages(struct domain *d, struct ffa_shm_mem *shm,
     uint64_t addr;
     uint64_t page_count;
     uint64_t gaddr;
+    int32_t ret;
 
     for ( n = 0; n < range_count; n++ )
     {
@@ -188,6 +271,20 @@ static int32_t get_shm_pages(struct domain *d, struct ffa_shm_mem *shm,
 
             gaddr = addr + m * FFA_PAGE_SIZE;
             gfn = gaddr_to_gfn(gaddr);
+            if ( shm->lend )
+            {
+                shm->gfns[pg_idx] = gfn;
+                ret = get_lend_page(d, shm, pg_idx, gfn);
+                if ( ret )
+                {
+                    gdprintk(XENLOG_DEBUG,
+                             "ffa: mem lend page invalid: rg %u pg %u addr %#lx\n",
+                             n, m, (unsigned long)gaddr);
+                    return ret;
+                }
+                pg_idx++;
+                continue;
+            }
             shm->pages[pg_idx] = get_page_from_gfn(d, gfn_x(gfn), &t,
 						   P2M_ALLOC);
             if ( !shm->pages[pg_idx] )
@@ -227,7 +324,8 @@ static void put_shm_pages(struct ffa_shm_mem *shm)
 
     for ( n = 0; n < shm->page_count && shm->pages[n]; n++ )
     {
-        put_page(shm->pages[n]);
+        if ( !shm->lend || shm->lend_type == p2m_ram_rw )
+            put_page(shm->pages[n]);
         shm->pages[n] = NULL;
     }
 }
@@ -279,19 +377,33 @@ static void dec_ctx_shm_count(struct domain *d, struct ffa_ctx *ctx)
 }
 
 static struct ffa_shm_mem *alloc_ffa_shm_mem(struct domain *d,
-                                             unsigned int page_count)
+                                             unsigned int page_count,
+                                             bool lend)
 {
     struct ffa_ctx *ctx = d->arch.tee;
     struct ffa_shm_mem *shm;
 
-    if ( page_count > FFA_MAX_SHM_PAGE_COUNT )
+    if ( page_count > (lend ? FFA_MAX_LEND_PAGE_COUNT
+                            : FFA_MAX_SHM_PAGE_COUNT) )
         return NULL;
     if ( !inc_ctx_shm_count(d, ctx) )
         return NULL;
 
-    shm = xzalloc_flex_struct(struct ffa_shm_mem, pages, page_count);
+    shm = xvzalloc_flex_struct(struct ffa_shm_mem, pages, page_count);
+    if ( shm && lend )
+    {
+        shm->gfns = xvzalloc_array(gfn_t, page_count);
+        if ( !shm->gfns )
+        {
+            xvfree(shm);
+            shm = NULL;
+        }
+    }
     if ( shm )
+    {
         shm->page_count = page_count;
+        shm->lend = lend;
+    }
     else
         dec_ctx_shm_count(d, ctx);
 
@@ -307,7 +419,8 @@ static void free_ffa_shm_mem(struct domain *d, struct ffa_shm_mem *shm)
 
     dec_ctx_shm_count(d, ctx);
     put_shm_pages(shm);
-    xfree(shm);
+    xvfree(shm->gfns);
+    xvfree(shm);
 }
 
 static void init_range(struct ffa_address_range *addr_range,
@@ -352,7 +465,8 @@ static int share_shm(struct ffa_shm_mem *shm, uint32_t ffa_vers)
     memset(descr, 0, sizeof(*descr));
     descr->sender_id = shm->sender_id;
     descr->handle = shm->handle;
-    descr->mem_reg_attr = FFA_NORMAL_MEM_REG_ATTR;
+    /* A lender to a secure partition leaves the attributes to the borrower */
+    descr->mem_reg_attr = shm->lend ? 0 : FFA_NORMAL_MEM_REG_ATTR;
     descr->mem_access_count = 1;
     if ( ffa_vers >= FFA_VERSION_1_2 )
         mem_access_size = sizeof(struct ffa_mem_access_1_2);
@@ -421,7 +535,8 @@ static int share_shm(struct ffa_shm_mem *shm, uint32_t ffa_vers)
         init_range(addr_range, pa);
     }
 
-    ret = ffa_spmc_share(tot_len, &shm->handle);
+    ret = ffa_spmc_share(shm->lend ? FFA_MEM_LEND_64 : FFA_MEM_SHARE_64,
+                         tot_len, &shm->handle);
 
 out:
     ffa_rxtx_spmc_tx_release();
@@ -509,7 +624,7 @@ static int read_mem_transaction(uint32_t ffa_vers, const void *buf, size_t blen,
     return 0;
 }
 
-void ffa_handle_mem_share(struct cpu_user_regs *regs)
+void ffa_handle_mem_share(struct cpu_user_regs *regs, bool lend)
 {
     uint32_t tot_len = get_user_reg(regs, 1);
     uint32_t frag_len = get_user_reg(regs, 2);
@@ -533,7 +648,7 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
     uint8_t perm;
     uint64_t impdef[2];
 
-    if ( !ffa_fw_supports_fid(FFA_MEM_SHARE_64) )
+    if ( !ffa_fw_supports_fid(lend ? FFA_MEM_LEND_64 : FFA_MEM_SHARE_64) )
     {
         ret = FFA_RET_NOT_SUPPORTED;
         goto out_set_ret;
@@ -581,7 +696,7 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
         goto out_unlock;
     }
 
-    if ( trans.mem_reg_attr != FFA_NORMAL_MEM_REG_ATTR )
+    if ( trans.mem_reg_attr != (lend ? 0 : FFA_NORMAL_MEM_REG_ATTR) )
     {
         ret = FFA_RET_NOT_SUPPORTED;
         goto out_unlock;
@@ -657,7 +772,7 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
         goto out_unlock;
     }
 
-    shm = alloc_ffa_shm_mem(d, page_count);
+    shm = alloc_ffa_shm_mem(d, page_count, lend);
     if ( !shm )
     {
         ret = FFA_RET_NO_MEMORY;
@@ -681,9 +796,20 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
     if ( ret )
         goto out;
 
+    /* The lender loses access before the borrower can retrieve the pages */
+    if ( lend && lend_map(d, shm, false) )
+    {
+        ret = FFA_RET_DENIED;
+        goto out;
+    }
+
     ret = share_shm(shm, ffa_fw_version);
     if ( ret )
+    {
+        if ( lend && lend_map(d, shm, true) )
+            printk(XENLOG_G_ERR "%pd: ffa: lost pages of a failed lend\n", d);
         goto out;
+    }
 
     spin_lock(&ctx->lock);
     list_add_tail(&shm->list, &ctx->shm_list);
@@ -744,6 +870,9 @@ int32_t ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags)
     }
     else
     {
+        if ( shm->lend && lend_map(d, shm, true) )
+            printk(XENLOG_G_ERR "%pd: ffa: cannot map back reclaimed handle %#lx\n",
+                   d, shm->handle);
         free_ffa_shm_mem(d, shm);
     }
 
@@ -797,7 +926,8 @@ bool ffa_shm_domain_destroy(struct domain *d)
              * domain.
              */
             list_del(&shm->list);
-            xfree(shm);
+            xvfree(shm->gfns);
+            xvfree(shm);
             break;
         }
     }
