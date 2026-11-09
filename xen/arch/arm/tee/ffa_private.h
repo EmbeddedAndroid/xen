@@ -97,6 +97,12 @@
 #define FFA_MAX_SHM_PAGE_COUNT          (2 * SZ_512K / FFA_PAGE_SIZE)
 
 /*
+ * Lending moves whole buffers out of the lender's reach, such as the
+ * firmware carve-outs of co-processors, so it takes larger regions.
+ */
+#define FFA_MAX_LEND_PAGE_COUNT         (SZ_128M / FFA_PAGE_SIZE)
+
+/*
  * Limits the number of shared buffers that guest can have at once. This
  * is to prevent case, when guests trick XEN into exhausting its own
  * memory by allocating many small buffers. This value has been chosen
@@ -445,7 +451,7 @@ extern atomic_t ffa_vm_count;
 #endif
 
 bool ffa_shm_domain_destroy(struct domain *d);
-void ffa_handle_mem_share(struct cpu_user_regs *regs);
+void ffa_handle_mem_share(struct cpu_user_regs *regs, bool lend);
 int32_t ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags);
 
 bool ffa_partinfo_init(void);
