@@ -1,0 +1,26 @@
+SMMUv2 entries programmed by the secure firmware
+================================================
+
+An SMMUv2 without the Security Extensions (IDR0.SES = 0, as Qualcomm's
+MMU-500s) has no secure SMRs or context banks, so OP-TEE programs the
+stage 2 of the co-processor firmware streams in entries of the
+non-secure interface, which Xen also drives. OP-TEE publishes them with
+the OP-TEE FF-A call OPTEE_FFA_FW_SMMU_INFO (w3 = 9, layout 1): per SMMU
+a range of SMRs and of context banks at the top of each, a range of
+VMIDs, and the streams (SMR values) it maps.
+
+When the FF-A mediator found an SPMC, Xen asks for the slice of each
+SMMU it probes and:
+
+ - uses only the SMRs and context banks below the slice;
+ - drops firmware streams from every master that lists them ("stream
+   0x... belongs to the secure firmware, not mapped"), so no domain gets
+   an SMR for them;
+ - panics if it cannot fence the slice (not at the top of the ranges,
+   firmware VMIDs not above Xen's).
+
+Without an SPMC, or when OP-TEE declares no slice for an SMMU, Xen logs
+"no secure firmware slice" and runs the SMMU as its own.
+
+Not covered: iommu=no (the hardware domain gets every SMMU), TEE
+mediators other than FF-A, and the firmware's memory itself.
