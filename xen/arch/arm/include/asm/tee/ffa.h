@@ -11,6 +11,7 @@
 #define __ASM_ARM_TEE_FFA_H__
 
 #include <xen/const.h>
+#include <xen/errno.h>
 
 #include <asm/smccc.h>
 #include <asm/types.h>
@@ -28,8 +29,17 @@ static inline bool is_ffa_fid(uint32_t fid)
 
 #ifdef CONFIG_FFA
 #define FFA_NR_FUNCS    12
+
+int ffa_spmc_direct_req(struct arm_smccc_1_2_regs *req,
+                        struct arm_smccc_1_2_regs *resp);
 #else
 #define FFA_NR_FUNCS    0
+
+static inline int ffa_spmc_direct_req(struct arm_smccc_1_2_regs *req,
+                                      struct arm_smccc_1_2_regs *resp)
+{
+    return -EOPNOTSUPP;
+}
 #endif
 
 #endif /*__ASM_ARM_TEE_FFA_H__*/
