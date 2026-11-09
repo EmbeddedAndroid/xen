@@ -1272,6 +1272,65 @@ int __init make_psci_node(void *fdt)
     return res;
 }
 
+/* The host's node of physical CPU @cpu */
+static const struct dt_device_node *__init host_cpu_node(unsigned int cpu)
+{
+    const struct dt_device_node *cpus = dt_find_node_by_path("/cpus");
+    const struct dt_device_node *np;
+
+    if ( !cpus )
+        return NULL;
+
+    dt_for_each_child_node(cpus, np)
+    {
+        unsigned int cells = dt_n_addr_cells(np);
+        const __be32 *reg;
+        u32 len;
+
+        if ( !dt_device_type_is_equal(np, "cpu") )
+            continue;
+
+        reg = dt_get_property(np, "reg", &len);
+        if ( reg && len >= cells * sizeof(*reg) &&
+             (dt_read_number(reg, cells) & MPIDR_HWID_MASK) ==
+             cpu_logical_map(cpu) )
+            return np;
+    }
+
+    return NULL;
+}
+
+/* One cluster of the pinned vCPUs, by the phandles of their CPUs */
+static int __init make_cpu_map(const struct domain *d, void *fdt,
+                               const cpumask_t *pcpus)
+{
+    unsigned int cpu, pcpu = cpumask_first(pcpus);
+    char buf[16];
+    int res;
+
+    res = fdt_begin_node(fdt, "cpu-map");
+    if ( !res )
+        res = fdt_begin_node(fdt, "cluster0");
+
+    for ( cpu = 0; !res && cpu < d->max_vcpus; cpu++ )
+    {
+        snprintf(buf, sizeof(buf), "core%u", cpu);
+        res = fdt_begin_node(fdt, buf);
+        if ( !res )
+            res = fdt_property_cell(fdt, "cpu", host_cpu_node(pcpu)->phandle);
+        if ( !res )
+            res = fdt_end_node(fdt);
+        pcpu = cpumask_cycle(pcpu, pcpus);
+    }
+
+    if ( !res )
+        res = fdt_end_node(fdt);
+    if ( !res )
+        res = fdt_end_node(fdt);
+
+    return res;
+}
+
 int __init make_cpus_node(const struct domain *d, struct kernel_info *kinfo)
 {
     int res;
@@ -1287,6 +1346,20 @@ int __init make_cpus_node(const struct domain *d, struct kernel_info *kinfo)
     bool clock_valid = false;
     uint64_t mpidr_aff;
     void *fdt = kinfo->fdt;
+    /*
+     * A pinned dom0 vCPU only ever runs on the physical CPU the scheduler
+     * placed it on (sched_select_initial_cpu()), so its capacity is that
+     * CPU's: describe it, for the OS to place work on a big.LITTLE system.
+     */
+    bool pinned = d->domain_id == 0 && opt_dom0_vcpus_pin;
+    const cpumask_t *pcpus = pinned ? cpupool_valid_cpus(d->cpupool) : NULL;
+    unsigned int pcpu = pinned ? cpumask_first(pcpus) : 0;
+    /*
+     * With one vCPU per physical CPU, each vCPU node also takes its CPU's
+     * phandle, which the host's nodes refer to, and a cpu-map, without
+     * which Linux ignores the capacities.
+     */
+    bool map = pinned && d->max_vcpus <= cpumask_weight(pcpus);
 
     dt_dprintk("Create cpus node\n");
 
@@ -1392,7 +1465,37 @@ int __init make_cpus_node(const struct domain *d, struct kernel_info *kinfo)
                 return res;
         }
 
+        if ( pinned )
+        {
+            const struct dt_device_node *np = host_cpu_node(pcpu);
+            u32 capacity;
+
+            if ( np && dt_property_read_u32(np, "capacity-dmips-mhz",
+                                            &capacity) )
+            {
+                res = fdt_property_cell(fdt, "capacity-dmips-mhz", capacity);
+                if ( res )
+                    return res;
+            }
+            if ( map && np && np->phandle )
+            {
+                res = fdt_property_cell(fdt, "phandle", np->phandle);
+                if ( res )
+                    return res;
+            }
+            else
+                map = false;
+            pcpu = cpumask_cycle(pcpu, pcpus);
+        }
+
         res = fdt_end_node(fdt);
+        if ( res )
+            return res;
+    }
+
+    if ( map )
+    {
+        res = make_cpu_map(d, fdt, pcpus);
         if ( res )
             return res;
     }
