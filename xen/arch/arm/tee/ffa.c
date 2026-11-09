@@ -21,8 +21,7 @@
  * Unsupported FF-A interfaces:
  * o FFA_MSG_POLL and FFA_MSG_SEND - deprecated in FF-A-1.1-REL0
  * o FFA_MEM_RETRIEVE_* - Used when sharing memory from an SP to a VM
- * o FFA_MEM_DONATE_* and FFA_MEM_LEND_* - Used when tranferring ownership
- *   or access of a memory region
+ * o FFA_MEM_DONATE_* - Used when tranferring ownership of a memory region
  * o FFA_MSG_SEND2 and FFA_MSG_WAIT - Used for indirect messaging
  *
  * Limitations in the implemented FF-A interfaces:
@@ -36,6 +35,12 @@
  *   - normal memory
  *   - at most 512 kB large memory regions
  *   - at most 32 shared memory regions per guest
+ * o FFA_MEM_LEND_*: as FFA_MEM_SHARE_*, and
+ *   - the pages leave the lender's stage 2 (and so its DMA view) until the
+ *     SPMC accepts their reclaim
+ *   - normal RAM of the lender, or reserved memory a direct-mapped hardware
+ *     domain has 1:1
+ *   - at most 128 MB large memory regions
  * o FFA_MSG_SEND_DIRECT_REQ:
  *   - only supported from a VM to an SP
  * o FFA_NOTIFICATION_*:
@@ -105,6 +110,7 @@ static const struct ffa_fw_abi ffa_fw_abi_needed[] = {
     FW_ABI(FFA_RXTX_MAP_64),
     FW_ABI(FFA_RXTX_UNMAP),
     FW_ABI(FFA_MEM_SHARE_64),
+    FW_ABI(FFA_MEM_LEND_64),
     FW_ABI(FFA_MEM_RECLAIM),
     FW_ABI(FFA_MSG_SEND_DIRECT_REQ_32),
     FW_ABI(FFA_MSG_SEND_DIRECT_REQ_64),
@@ -315,7 +321,11 @@ static void handle_features(struct cpu_user_regs *regs)
         break;
     case FFA_MEM_SHARE_64:
     case FFA_MEM_SHARE_32:
-        if ( !ffa_fw_supports_fid(FFA_MEM_SHARE_64) )
+    case FFA_MEM_LEND_64:
+    case FFA_MEM_LEND_32:
+        if ( !ffa_fw_supports_fid(a1 == FFA_MEM_LEND_64 ||
+                                  a1 == FFA_MEM_LEND_32 ?
+                                  FFA_MEM_LEND_64 : FFA_MEM_SHARE_64) )
         {
             ffa_set_regs_error(regs, FFA_RET_NOT_SUPPORTED);
             break;
@@ -444,7 +454,11 @@ static bool ffa_handle_call(struct cpu_user_regs *regs)
         break;
     case FFA_MEM_SHARE_32:
     case FFA_MEM_SHARE_64:
-        ffa_handle_mem_share(regs);
+        ffa_handle_mem_share(regs, false);
+        return true;
+    case FFA_MEM_LEND_32:
+    case FFA_MEM_LEND_64:
+        ffa_handle_mem_share(regs, true);
         return true;
     case FFA_MEM_RECLAIM:
         e = ffa_handle_mem_reclaim(regpair_to_uint64(get_user_reg(regs, 2),
