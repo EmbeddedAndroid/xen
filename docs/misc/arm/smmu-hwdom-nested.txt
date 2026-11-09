@@ -1,0 +1,44 @@
+Hardware domain stage 1 on an Arm SMMUv2 (dom0-iommu=nested)
+=============================================================
+
+Without this option Xen drives every SMMUv2 it can initialise with stage-2
+context banks only and describes it to the hardware domain disabled. The
+hardware domain's devices then translate through Xen's stage 2 of it, but
+the hardware domain gets no IOMMU of its own, and Linux drivers that need
+an IOMMU domain for their own address space (msm DPU and Adreno, fastrpc,
+video codecs) do not probe or need bounce buffers below 4 GiB.
+
+With dom0-iommu=nested, a direct-mapped hardware domain drives stage 1 of
+each SMMUv2 that implements nested translation (ID0.NTS), on top of Xen's
+stage 2 of the hardware domain:
+
+- Xen splits the stream match registers and context banks it may use (the
+  first 128 SMRs at most, below any slice the secure firmware owns, see
+  smmu-secure-firmware.txt): the hardware domain gets the bottom 7/8 of
+  each, Xen keeps the rest (at least two of each) for its stage-2 bank of
+  the hardware domain and for other domains' devices.
+- The SMMU node is described to the hardware domain enabled. Xen maps it
+  the context bank pages of its own banks and their interrupts, and
+  emulates the global register pages: ID0/ID1 describe a stage-1 only
+  SMMU with the hardware domain's SMRs and context banks, sCR0 and sACR
+  are the hardware domain's own copies, and only the all-non-secure TLB
+  invalidation, the global sync and the global fault status reach the
+  hardware.
+- Every context bank of the hardware domain is a stage-1 bank nested on
+  Xen's stage-2 bank (CBAR type 3), so its translations, and its page
+  table walks, go through Xen's stage 2 of the hardware domain. A bypass
+  stream translates through the stage-2 bank; a stream routed to a bank
+  that is not the hardware domain's faults.
+- An SMR that could match a stream of another domain or of the secure
+  firmware is left invalid and logged; Xen refuses to assign another
+  domain a device whose streams match a valid SMR of the hardware domain.
+  Refused SMR and S2CR values read back as what is in effect.
+
+Xen's own stage 2 of the hardware domain shares the CPU's page tables, as
+for any other domain, so grant and foreign mappings and memory lent to
+the secure world are reflected in what the hardware domain's devices can
+reach.
+
+Not handled: SMMUs Xen cannot initialise at boot (for instance one in a
+power domain that is off) stay passed through as before; extended stream
+IDs are hidden from the hardware domain.

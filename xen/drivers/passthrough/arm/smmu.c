@@ -41,6 +41,7 @@
 #include <xen/delay.h>
 #include <xen/errno.h>
 #include <xen/err.h>
+#include <xen/iocap.h>
 #include <xen/irq.h>
 #include <xen/lib.h>
 #include <xen/linux-compat.h>
@@ -55,9 +56,12 @@
 #include <asm/device.h>
 #include <asm/io.h>
 #include <asm/iommu_fwspec.h>
+#include <asm/mmio.h>
 #include <asm/platform.h>
+#include <asm/setup.h>
 
 #include "smmu-fw.h"
+#include "smmu-nested.h"
 
 /* Xen: The below defines are redefined within the file. Undef it */
 #undef SCTLR_AFE
@@ -675,6 +679,30 @@ struct arm_smmu_device {
 	/* Xen: SMRs and context banks the secure firmware programs */
 	bool				has_fw_slice;
 	struct smmu_fw_slice		fw_slice;
+
+	/*
+	 * Xen: with dom0-iommu=nested, the SMRs and context banks below these
+	 * are the hardware domain's, Xen allocates from them up.
+	 */
+	bool				can_nest;
+	unsigned int			hwdom_nr_smr;
+	unsigned int			hwdom_nr_cb;
+	struct arm_smmu_hwdom		*hwdom;
+};
+
+/*
+ * Xen: the hardware domain's view of the SMMU registers it configures
+ * when it drives stage 1 (see smmu-nested.c).
+ */
+struct arm_smmu_hwdom {
+	struct arm_smmu_device		*smmu;
+	struct iommu_domain		*s2;	/* Xen's stage 2 for it */
+	u32				scr0;
+	u32				sacr;
+	u32				cbar[ARM_SMMU_MAX_CBS];
+	u32				cba2r[ARM_SMMU_MAX_CBS];
+	u32				*smr;
+	u32				*s2cr;
 };
 
 struct arm_smmu_cfg {
@@ -1447,7 +1475,8 @@ static int arm_smmu_init_domain_context(struct iommu_domain *domain,
 		goto out_unlock;
 	}
 
-	ret = __arm_smmu_alloc_bitmap(smmu->context_map, start,
+	ret = __arm_smmu_alloc_bitmap(smmu->context_map,
+				      max_t(int, start, smmu->hwdom_nr_cb),
 				      smmu->num_context_banks);
 	if (IS_ERR_VALUE(ret))
 		goto out_unlock;
@@ -1638,6 +1667,14 @@ static void arm_smmu_write_sme(struct arm_smmu_device *smmu, int idx)
 		arm_smmu_write_smr(smmu, idx);
 }
 
+/* Xen: whether hardware domain @d drives stage 1 of @smmu */
+static bool arm_smmu_hwdom_nests(const struct domain *d,
+				 const struct arm_smmu_device *smmu)
+{
+	return smmu && smmu->hwdom_nr_cb && is_hardware_domain(d) &&
+	       is_domain_direct_mapped(d);
+}
+
 static int arm_smmu_find_sme(struct arm_smmu_device *smmu, u16 id, u16 mask)
 {
 	struct arm_smmu_smr *smrs = smmu->smrs;
@@ -1647,8 +1684,20 @@ static int arm_smmu_find_sme(struct arm_smmu_device *smmu, u16 id, u16 mask)
 	if (!smrs)
 		return id;
 
+	/* Xen: nor any stream the hardware domain maps itself */
+	if (smmu->hwdom) {
+		for (i = 0; i < smmu->hwdom_nr_smr; ++i) {
+			u32 smr = smmu->hwdom->smr[i];
+
+			if ((smr & SMR_VALID) &&
+			    smmu_nested_smr_overlaps(smr, mask << SMR_MASK_SHIFT | id,
+						     smmu->streamid_mask))
+				return -EBUSY;
+		}
+	}
+
 	/* Validating SMRs is... less so */
-	for (i = 0; i < smmu->num_mapping_groups; ++i) {
+	for (i = smmu->hwdom_nr_smr; i < smmu->num_mapping_groups; ++i) {
 		if (!smrs[i].valid) {
 			/*
 			 * Note the first free entry we come across, which
@@ -2359,6 +2408,35 @@ static void arm_smmu_fw_slice_probe(struct arm_smmu_device *smmu)
 		   s->nr_streams);
 }
 
+/*
+ * Xen: Qualcomm's MMU-500s report more stream match groups than the
+ * architected 128, and Linux uses only the first 128 of those; keep both
+ * slices within them.
+ */
+#define ARM_SMMU_NESTED_MAX_SMRS	128
+
+static void arm_smmu_nested_probe(struct arm_smmu_device *smmu)
+{
+	unsigned int nr_smr = min_t(unsigned int, smmu->num_mapping_groups,
+				    ARM_SMMU_NESTED_MAX_SMRS);
+
+	if (!iommu_hwdom_nested)
+		return;
+
+	if (!smmu->can_nest || !smmu->smrs ||
+	    smmu->version != ARM_SMMU_V2 ||
+	    !smmu_nested_split(nr_smr, smmu->num_context_banks,
+			       &smmu->hwdom_nr_smr, &smmu->hwdom_nr_cb)) {
+		dev_notice(smmu->dev,
+			   "	no stage 1 for the hardware domain: needs SMMUv2 nested translation and stream matching\n");
+		smmu->hwdom_nr_smr = smmu->hwdom_nr_cb = 0;
+		return;
+	}
+
+	dev_notice(smmu->dev, "	hardware domain stage 1: SMR 0-%u, CB 0-%u\n",
+		   smmu->hwdom_nr_smr - 1, smmu->hwdom_nr_cb - 1);
+}
+
 static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 {
 	unsigned long size;
@@ -2379,6 +2457,9 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 #endif
 
 	/* Restrict available stages based on module parameter */
+	smmu->can_nest = (id & (ID0_S1TS | ID0_S2TS | ID0_NTS)) ==
+			 (ID0_S1TS | ID0_S2TS | ID0_NTS);
+
 	if (force_stage == 1)
 		id &= ~(ID0_S2TS | ID0_NTS);
 	else if (force_stage == 2)
@@ -2533,6 +2614,7 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 
 	smmu->num_hw_context_banks = smmu->num_context_banks;
 	arm_smmu_fw_slice_probe(smmu);
+	arm_smmu_nested_probe(smmu);
 
 	return 0;
 }
@@ -2912,6 +2994,10 @@ static int arm_smmu_assign_dev(struct domain *d, u8 devfn,
 	}
 #endif
 
+	/* Xen: the hardware domain maps its streams on this SMMU itself */
+	if (arm_smmu_hwdom_nests(d, find_smmu_for_device(dev)))
+		return 0;
+
 	if (!dev_iommu_group(dev)) {
 		ret = arm_smmu_add_device(dev);
 		if (ret)
@@ -2983,6 +3069,9 @@ static int arm_smmu_deassign_dev(struct domain *d, uint8_t devfn,
 #endif
 
 	xen_domain = dom_iommu(d)->arch.priv;
+
+	if (!domain && arm_smmu_hwdom_nests(d, find_smmu_for_device(dev)))
+		return 0;
 
 	if (!domain || domain->priv->cfg.domain != d) {
 		dev_err(dev, " not attached to domain %d\n", d->domain_id);
@@ -3059,6 +3148,294 @@ static void arm_smmu_iommu_domain_teardown(struct domain *d)
 	xfree(xen_domain);
 }
 
+/*
+ * Xen: dom0-iommu=nested. The hardware domain drives stage 1 of the SMMU:
+ * Xen emulates the global registers (smmu-nested.c) and maps it its
+ * context banks, each of them a stage-1 bank nested on Xen's stage 2 of
+ * the hardware domain.
+ */
+/* Whether SMR value @smr can match a stream the hardware domain may not have */
+static bool arm_smmu_hwdom_smr_forbidden(struct arm_smmu_device *smmu, u32 smr)
+{
+	unsigned int i;
+
+	if (smmu->has_fw_slice &&
+	    smmu_fw_slice_owns(&smmu->fw_slice, smr & ~SMR_VALID,
+			       smmu->streamid_mask))
+		return true;
+
+	for (i = smmu->hwdom_nr_smr; i < smmu->num_mapping_groups; i++) {
+		const struct arm_smmu_smr *x = &smmu->smrs[i];
+
+		if (x->valid &&
+		    smmu_nested_smr_overlaps(smr,
+					     (u32)x->mask << SMR_MASK_SHIFT | x->id,
+					     smmu->streamid_mask))
+			return true;
+	}
+
+	return false;
+}
+
+static u8 arm_smmu_hwdom_s2_cbndx(const struct arm_smmu_hwdom *h)
+{
+	return h->s2->priv->cfg.cbndx;
+}
+
+static int arm_smmu_hwdom_mmio_read(struct vcpu *v, mmio_info_t *info,
+				    register_t *r, void *priv)
+{
+	struct arm_smmu_hwdom *h = priv;
+	struct arm_smmu_device *smmu = h->smmu;
+	unsigned long off = info->gpa - smmu->phys;
+	unsigned int idx = 0;
+
+	*r = 0;
+	if (info->dabt.size != DABT_WORD)
+		return 1;
+
+	switch (smmu_nested_classify(off, smmu->pgshift, false,
+				     smmu->hwdom_nr_smr, smmu->hwdom_nr_cb,
+				     &idx)) {
+	case SMMU_NESTED_IGNORE:
+		break;
+	case SMMU_NESTED_HW:
+		*r = readl_relaxed(smmu->base + off);
+		break;
+	case SMMU_NESTED_SCR0:
+		*r = h->scr0;
+		break;
+	case SMMU_NESTED_SACR:
+		*r = h->sacr;
+		break;
+	case SMMU_NESTED_ID0:
+		*r = smmu_nested_id0(readl_relaxed(smmu->base + off),
+				     smmu->hwdom_nr_smr);
+		break;
+	case SMMU_NESTED_ID1:
+		*r = smmu_nested_id1(readl_relaxed(smmu->base + off),
+				     smmu->hwdom_nr_cb);
+		break;
+	case SMMU_NESTED_SMR:
+		*r = h->smr[idx];
+		break;
+	case SMMU_NESTED_S2CR:
+		*r = h->s2cr[idx];
+		break;
+	case SMMU_NESTED_CBAR:
+		*r = h->cbar[idx];
+		break;
+	case SMMU_NESTED_CBFRSYNRA:
+		*r = readl_relaxed(smmu->base + off);
+		break;
+	case SMMU_NESTED_CBA2R:
+		*r = h->cba2r[idx];
+		break;
+	}
+
+	return 1;
+}
+
+static int arm_smmu_hwdom_mmio_write(struct vcpu *v, mmio_info_t *info,
+				     register_t r, void *priv)
+{
+	struct arm_smmu_hwdom *h = priv;
+	struct arm_smmu_device *smmu = h->smmu;
+	unsigned long off = info->gpa - smmu->phys;
+	unsigned int idx = 0;
+	u32 val = r, hw;
+
+	if (info->dabt.size != DABT_WORD)
+		return 1;
+
+	switch (smmu_nested_classify(off, smmu->pgshift, true,
+				     smmu->hwdom_nr_smr, smmu->hwdom_nr_cb,
+				     &idx)) {
+	case SMMU_NESTED_IGNORE:
+	case SMMU_NESTED_ID0:
+	case SMMU_NESTED_ID1:
+		break;
+	case SMMU_NESTED_HW:
+	case SMMU_NESTED_CBFRSYNRA:
+		writel_relaxed(val, smmu->base + off);
+		break;
+	case SMMU_NESTED_SCR0:
+		h->scr0 = val;
+		break;
+	case SMMU_NESTED_SACR:
+		h->sacr = val;
+		break;
+	case SMMU_NESTED_SMR:
+		val &= SMR_VALID |
+		       (u32)smmu->smr_mask_mask << SMR_MASK_SHIFT |
+		       (u32)smmu->streamid_mask << SMR_ID_SHIFT;
+		/* It reads back what is in effect */
+		spin_lock(&smmu->stream_map_lock);
+		if ((val & SMR_VALID) &&
+		    arm_smmu_hwdom_smr_forbidden(smmu, val)) {
+			gprintk(XENLOG_WARNING,
+				"%s: SMR %u = %#x can match a stream it may not have, left invalid\n",
+				dev_name(smmu->dev), idx, val);
+			val &= ~SMR_VALID;
+		}
+		h->smr[idx] = val;
+		writel_relaxed(val, ARM_SMMU_GR0(smmu) + ARM_SMMU_GR0_SMR(idx));
+		spin_unlock(&smmu->stream_map_lock);
+		break;
+	case SMMU_NESTED_S2CR:
+		/*
+		 * It reads back what it wrote, as long as that is in effect:
+		 * Linux probes for firmware that turns bypass into fault.
+		 */
+		hw = smmu_nested_s2cr(val, smmu->hwdom_nr_cb,
+				      arm_smmu_hwdom_s2_cbndx(h));
+		h->s2cr[idx] = hw == SMMU_NESTED_S2CR_FAULT ? hw : val;
+		writel_relaxed(hw, ARM_SMMU_GR0(smmu) + ARM_SMMU_GR0_S2CR(idx));
+		break;
+	case SMMU_NESTED_CBAR:
+		h->cbar[idx] = val;
+		writel_relaxed(smmu_nested_cbar(arm_smmu_hwdom_s2_cbndx(h)),
+			       ARM_SMMU_GR1(smmu) + ARM_SMMU_GR1_CBAR(idx));
+		break;
+	case SMMU_NESTED_CBA2R:
+		h->cba2r[idx] = val;
+		writel_relaxed(smmu_nested_cba2r(val),
+			       ARM_SMMU_GR1(smmu) + ARM_SMMU_GR1_CBA2R(idx));
+		break;
+	}
+
+	return 1;
+}
+
+static const struct mmio_handler_ops arm_smmu_hwdom_mmio_ops = {
+	.read = arm_smmu_hwdom_mmio_read,
+	.write = arm_smmu_hwdom_mmio_write,
+};
+
+/* Xen's stage-2 context of @d on @smmu, created on first use */
+static struct iommu_domain *arm_smmu_get_s2_context(struct domain *d,
+						    struct arm_smmu_device *smmu)
+{
+	struct arm_smmu_xen_domain *xen_domain = dom_iommu(d)->arch.priv;
+	struct iommu_domain *domain;
+	int ret;
+
+	spin_lock(&xen_domain->lock);
+
+	list_for_each_entry(domain, &xen_domain->contexts, list) {
+		if (domain->priv->smmu == smmu)
+			goto out;
+	}
+
+	domain = xzalloc(struct iommu_domain);
+	if (!domain) {
+		domain = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	ret = arm_smmu_domain_init(domain);
+	if (!ret) {
+		domain->priv->cfg.domain = d;
+		ret = arm_smmu_init_domain_context(domain, smmu);
+		if (ret)
+			xfree(domain->priv);
+	}
+	if (ret) {
+		xfree(domain);
+		domain = ERR_PTR(ret);
+		goto out;
+	}
+
+	/* Held for the life of the domain, like a master's reference */
+	atomic_inc(&domain->ref);
+	list_add(&domain->list, &xen_domain->contexts);
+
+out:
+	spin_unlock(&xen_domain->lock);
+	return domain;
+}
+
+static int arm_smmu_dt_hwdom_nested(struct domain *d,
+				    const struct dt_device_node *np)
+{
+	struct arm_smmu_device *smmu = find_smmu(dt_to_dev(np));
+	struct arm_smmu_hwdom *h;
+	struct iommu_domain *s2;
+	paddr_t cb_phys;
+	unsigned long nr;
+	unsigned int i;
+	int ret;
+
+	if (!arm_smmu_hwdom_nests(d, smmu))
+		return 0;
+
+	s2 = arm_smmu_get_s2_context(d, smmu);
+	if (IS_ERR(s2))
+		return PTR_ERR(s2);
+
+	h = xzalloc(struct arm_smmu_hwdom);
+	if (!h)
+		return -ENOMEM;
+	h->smr = xzalloc_array(u32, smmu->hwdom_nr_smr);
+	h->s2cr = xzalloc_array(u32, smmu->hwdom_nr_smr);
+	if (!h->smr || !h->s2cr) {
+		xfree(h->smr);
+		xfree(h->s2cr);
+		xfree(h);
+		return -ENOMEM;
+	}
+
+	h->smmu = smmu;
+	h->s2 = s2;
+	h->scr0 = readl_relaxed(ARM_SMMU_GR0_NS(smmu) + ARM_SMMU_GR0_sCR0);
+	h->sacr = readl_relaxed(ARM_SMMU_GR0(smmu) + SMMU_NESTED_GR0_sACR);
+
+	/* Xen's reset left the SMRs invalid and the S2CRs faulting */
+	for (i = 0; i < smmu->hwdom_nr_smr; i++)
+		h->s2cr[i] = SMMU_NESTED_S2CR_FAULT;
+
+	/* A bank the hardware domain has not set up yet is stage 2 only */
+	for (i = 0; i < smmu->hwdom_nr_cb; i++) {
+		writel_relaxed(0, ARM_SMMU_CB_BASE(smmu) + ARM_SMMU_CB(smmu, i) +
+				  ARM_SMMU_CB_SCTLR);
+		writel_relaxed(smmu_nested_cba2r(CBA2R_RW64_64BIT),
+			       ARM_SMMU_GR1(smmu) + ARM_SMMU_GR1_CBA2R(i));
+		writel_relaxed(smmu_nested_cbar(arm_smmu_hwdom_s2_cbndx(h)),
+			       ARM_SMMU_GR1(smmu) + ARM_SMMU_GR1_CBAR(i));
+	}
+
+	spin_lock(&smmu->stream_map_lock);
+	smmu->hwdom = h;
+	spin_unlock(&smmu->stream_map_lock);
+
+	register_mmio_handler(d, &arm_smmu_hwdom_mmio_ops, smmu->phys,
+			      smmu->size >> 1, h);
+
+	cb_phys = smmu->phys + (smmu->size >> 1);
+	nr = (unsigned long)smmu->hwdom_nr_cb << (smmu->pgshift - PAGE_SHIFT);
+	ret = iomem_permit_access(d, paddr_to_pfn(cb_phys),
+				  paddr_to_pfn(cb_phys) + nr - 1);
+	if (!ret)
+		ret = map_mmio_regions(d, gaddr_to_gfn(cb_phys), nr,
+				       maddr_to_mfn(cb_phys));
+	if (ret)
+		return ret;
+
+	for (i = 0; i < smmu->hwdom_nr_cb; i++) {
+		ret = map_irq_to_domain(d, smmu->irqs[smmu->num_global_irqs + i],
+					true, dt_node_name(np));
+		if (ret)
+			return ret;
+	}
+
+	dev_notice(smmu->dev,
+		   "d%d drives stage 1 on SMR 0-%u, CB 0-%u, nested on CB %u\n",
+		   d->domain_id, smmu->hwdom_nr_smr - 1, smmu->hwdom_nr_cb - 1,
+		   arm_smmu_hwdom_s2_cbndx(h));
+
+	return 1;
+}
+
 static const struct iommu_ops arm_smmu_iommu_ops = {
     .page_sizes = PAGE_SIZE_4K,
     .init = arm_smmu_iommu_domain_init,
@@ -3073,6 +3450,7 @@ static const struct iommu_ops arm_smmu_iommu_ops = {
     .unmap_page = arm_iommu_unmap_page,
     .dt_xlate = arm_smmu_dt_xlate_generic,
     .dt_xlate_reserved = arm_smmu_dt_xlate_reserved,
+    .dt_hwdom_nested = arm_smmu_dt_hwdom_nested,
 };
 
 static struct arm_smmu_device *find_smmu(const struct device *dev)
