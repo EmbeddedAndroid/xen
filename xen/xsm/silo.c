@@ -20,6 +20,17 @@
 #define XSM_NO_WRAPPERS
 #include <xsm/dummy.h>
 
+static bool is_priv_domain(const struct domain *d)
+{
+    /*
+     * Open coding of:
+     *    is_xenstore_domain(d) || is_hardware_domain(d)
+     * to place all within one speculative barrier.
+     */
+    return evaluate_nospec((d->options & XEN_DOMCTL_CDF_xs_domain) ||
+                           d == hardware_domain);
+}
+
 /*
  * Check if inter-domain communication is allowed.
  * Return true when pass check.
@@ -29,8 +40,8 @@ static bool silo_mode_dom_check(const struct domain *ldom,
 {
     const struct domain *currd = current->domain;
 
-    return (is_control_domain(currd) || is_control_domain(ldom) ||
-            is_control_domain(rdom) || ldom == rdom);
+    return (is_priv_domain(currd) || is_priv_domain(ldom) ||
+            is_priv_domain(rdom) || ldom == rdom);
 }
 
 static int cf_check silo_evtchn_unbound(
