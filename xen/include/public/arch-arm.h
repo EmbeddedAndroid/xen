@@ -424,6 +424,12 @@ typedef uint64_t xen_callback_t;
 /* Virtio MMIO mappings */
 #define GUEST_VIRTIO_MMIO_BASE   xen_mk_ullong(0x02000000)
 #define GUEST_VIRTIO_MMIO_SIZE   xen_mk_ullong(0x00100000)
+/*
+ * Size of one virtio-mmio transport in that window. virtio-mmio has 0x100
+ * bytes of control registers followed by a device-specific configuration
+ * whose size depends on the device; 0x200 covers the known devices.
+ */
+#define GUEST_VIRTIO_MMIO_DEV_SIZE xen_mk_ullong(0x200)
 
 /*
  * vGIC mappings: Only one set of mapping is used by the guest.

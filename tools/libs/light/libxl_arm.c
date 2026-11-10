@@ -10,28 +10,18 @@
 #include <assert.h>
 #include <xen/device_tree_defs.h>
 
-/*
- * There is no clear requirements for the total size of Virtio MMIO region.
- * The size of control registers is 0x100 and device-specific configuration
- * registers starts at the offset 0x100, however it's size depends on the device
- * and the driver. Pick the biggest known size at the moment to cover most
- * of the devices (also consider allowing the user to configure the size via
- * config file for the one not conforming with the proposed value).
- */
-#define VIRTIO_MMIO_DEV_SIZE   xen_mk_ullong(0x200)
-
 static uint64_t alloc_virtio_mmio_base(libxl__gc *gc, uint64_t *virtio_mmio_base)
 {
     uint64_t base = *virtio_mmio_base;
 
     /* Make sure we have enough reserved resources */
-    if (base + VIRTIO_MMIO_DEV_SIZE >
+    if (base + GUEST_VIRTIO_MMIO_DEV_SIZE >
         GUEST_VIRTIO_MMIO_BASE + GUEST_VIRTIO_MMIO_SIZE) {
         LOG(ERROR, "Ran out of reserved range for Virtio MMIO BASE 0x%"PRIx64"\n",
             base);
         return 0;
     }
-    *virtio_mmio_base += VIRTIO_MMIO_DEV_SIZE;
+    *virtio_mmio_base += GUEST_VIRTIO_MMIO_DEV_SIZE;
 
     return base;
 }
@@ -994,7 +984,7 @@ static int make_virtio_mmio_node_common(libxl__gc *gc, void *fdt, uint64_t base,
     if (res) return res;
 
     res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
-                            1, base, VIRTIO_MMIO_DEV_SIZE);
+                            1, base, GUEST_VIRTIO_MMIO_DEV_SIZE);
     if (res) return res;
 
     set_interrupt(intr, irq, 0xf, DT_IRQ_TYPE_EDGE_RISING);
