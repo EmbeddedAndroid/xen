@@ -49,7 +49,10 @@ the FF-A path works, but a destroyed guest with live shares stays dying
 context interrupts and the APSS watchdog are extended SPIs), `HAS_ITS`,
 `FFA` (the FF-A mediator), `DEBUG`, `IOREQ_SERVER` (forwards a guest's
 virtio-mmio accesses to a device model such as QEMU in dom0; selectable
-on Arm only with `EXPERT`). Do not enable GENI early printk
+on Arm only with `EXPERT`), `BOOT_TIME_CPUPOOLS` and `SCHED_NULL` (a
+dom0less domain's `domain-cpupool` names a `xen,cpupool` node; without
+`BOOT_TIME_CPUPOOLS` Xen ignores both and the domain runs in Pool-0).
+Do not enable GENI early printk
 (`EARLY_UART_CHOICE_GENI`): it is not part of this branch and the
 experimental versions hang at entry on this board.
 
