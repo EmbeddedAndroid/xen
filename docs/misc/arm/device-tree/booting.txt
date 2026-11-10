@@ -244,6 +244,17 @@ with the following properties:
 
     The default is 1 when trap-unmapped-accesses is absent.
 
+- start-paused
+
+    Optional. A boolean property. When present, Xen builds the domain but
+    leaves it paused when it finishes booting, and the domain only starts
+    running once the control domain unpauses it (xl unpause, or
+    xc_domain_unpause()). A device model in another domain can then
+    register its ioreq server before the domain probes the devices it
+    emulates, as the toolstack does for the domains it creates.
+    Not valid for a domain with capabilities. Xen panics at boot if no
+    control domain exists to unpause the domain.
+
 - xen,enhanced
 
     A string property. Possible property values are:

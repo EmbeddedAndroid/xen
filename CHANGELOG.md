@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
  - On Arm:
    - Support for the Qualcomm SA8797P (Nord) and the Qualcomm GENI UART
      driver.
+   - The dom0less "start-paused" property, to keep a domain paused until
+     the control domain unpauses it.
 
 ### Removed
  - On Arm:

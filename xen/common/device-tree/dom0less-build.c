@@ -891,6 +891,8 @@ void __init create_domUs(void)
 {
     struct dt_device_node *node;
     const struct dt_device_node *chosen = dt_find_node_by_path("/chosen");
+    struct domain *d;
+    bool start_paused = false;
 
     BUG_ON(chosen == NULL);
     dt_for_each_child_node(chosen, node)
@@ -936,10 +938,40 @@ void __init create_domUs(void)
 
         if ( ki.bd.create_cfg.flags & XEN_DOMCTL_CDF_xs_domain )
             set_xs_domain(ki.bd.d);
+
+        if ( dt_property_read_bool(node, "start-paused") )
+        {
+            if ( (ki.bd.create_flags & (CDF_privileged | CDF_hardware)) ||
+                 (ki.bd.create_cfg.flags & XEN_DOMCTL_CDF_xs_domain) )
+                panic("start-paused is not valid for domain %s with capabilities\n",
+                      dt_node_name(node));
+
+            /*
+             * Take a second controller pause reference: Xen drops only the
+             * creation one when it goes active, and the control domain
+             * drops this one when it unpauses the domain.
+             */
+            rc = domain_pause_by_systemcontroller(ki.bd.d);
+            if ( rc )
+                panic("Could not pause domain %s (rc = %d)\n",
+                      dt_node_name(node), rc);
+
+            start_paused = true;
+        }
     }
 
     if ( need_xenstore && xs_domid == DOMID_INVALID )
         panic("xenstore requested, but xenstore domain not present\n");
+
+    if ( start_paused )
+    {
+        for_each_domain ( d )
+            if ( is_control_domain(d) )
+                break;
+
+        if ( !d )
+            panic("start-paused requested, but no control domain to unpause\n");
+    }
 
     initialize_domU_xenstore();
 }
