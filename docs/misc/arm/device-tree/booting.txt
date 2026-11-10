@@ -143,6 +143,14 @@ the same bits as "capabilities" and must include DOMAIN_CAPS_HARDWARE: dom0
 always remains the hardware domain. Without DOMAIN_CAPS_CONTROL dom0 may
 still use the Xen console. Xen panics at boot on an invalid value.
 
+DOMAIN_CAPS_NOT_HYPERCALL_TARGET makes dom0 untargetable, as
+hypercall-untargetable does for a dom0less domain: no other domain,
+including the control domain and device model domains, can act on it
+through domctls, dm_op or foreign mappings. Xen allocates static event
+channels whose nodes sit directly under /chosen on dom0's side, as the
+idle domain, which an untargetable dom0 refuses, so such a dom0 cannot
+have static event channels.
+
 Example: dom0 owns the hardware, runs xenstored and the device models, and
 a dom0less domain with capabilities = <0x1> is the control domain:
 
@@ -207,6 +215,8 @@ with the following properties:
     0x4 DOMAIN_CAPS_XENSTORE - The xenstore domain - there can be only 1
     0x8 DOMAIN_CAPS_DEVICE_MODEL - Runs device models (dm_op, foreign
                                    mapping) for other domains
+    0x10 DOMAIN_CAPS_NOT_HYPERCALL_TARGET - Cannot be the target of
+                                   hypercalls (see hypercall-untargetable)
 
     The default is no capabilities.
 

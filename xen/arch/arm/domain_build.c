@@ -2278,6 +2278,8 @@ void __init create_dom0(void)
         flags |= CDF_privileged;
     if ( caps & DOMAIN_CAPS_DEVICE_MODEL )
         dom0_cfg.flags |= XEN_DOMCTL_CDF_device_model;
+    if ( caps & DOMAIN_CAPS_NOT_HYPERCALL_TARGET )
+        dom0_cfg.flags |= XEN_DOMCTL_CDF_not_hypercall_target;
 
     /* The vGIC for DOM0 is exactly emulating the hardware GIC */
     dom0_cfg.arch.gic_version = gic_domctl_hw_version();
