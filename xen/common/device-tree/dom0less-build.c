@@ -121,8 +121,19 @@ static void __init initialize_domU_xenstore(void)
 
         if ( gfn != XENSTORE_PFN_LATE_ALLOC && IS_ENABLED(CONFIG_GRANT_TABLE) )
         {
+            struct xenstore_domain_interface *interface;
+            struct page_info *pg;
+
             ASSERT(gfn < UINT32_MAX);
             gnttab_seed_entry(d, GNTTAB_RESERVED_XENSTORE, xs_domid, gfn);
+
+            pg = get_page_from_gfn(d, gfn, NULL, P2M_ALLOC);
+            if ( !pg )
+                panic("%pd: xenstore page is not mapped\n", d);
+            interface = map_domain_page(page_to_mfn(pg));
+            interface->evtchn_port = d->arch.hvm.params[HVM_PARAM_STORE_EVTCHN];
+            unmap_domain_page(interface);
+            put_page(pg);
         }
     }
 }
