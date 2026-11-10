@@ -70,16 +70,6 @@ int main_resume(int argc, char **argv)
     return EXIT_SUCCESS;
 }
 
-static void pause_domain(uint32_t domid)
-{
-    libxl_domain_pause(ctx, domid, NULL);
-}
-
-static void unpause_domain(uint32_t domid)
-{
-    libxl_domain_unpause(ctx, domid, NULL);
-}
-
 static void destroy_domain(uint32_t domid, int force)
 {
     int rc;
@@ -96,26 +86,34 @@ static void destroy_domain(uint32_t domid, int force)
 
 int main_pause(int argc, char **argv)
 {
-    int opt;
+    int opt, rc;
 
     SWITCH_FOREACH_OPT(opt, "", NULL, "pause", 1) {
         /* No options */
     }
 
-    pause_domain(find_domain(argv[optind]));
+    rc = libxl_domain_pause(ctx, find_domain(argv[optind]), NULL);
+    if (rc) {
+        fprintf(stderr, "pause failed (rc=%d)\n", rc);
+        return EXIT_FAILURE;
+    }
 
     return EXIT_SUCCESS;
 }
 
 int main_unpause(int argc, char **argv)
 {
-    int opt;
+    int opt, rc;
 
     SWITCH_FOREACH_OPT(opt, "", NULL, "unpause", 1) {
         /* No options */
     }
 
-    unpause_domain(find_domain(argv[optind]));
+    rc = libxl_domain_unpause(ctx, find_domain(argv[optind]), NULL);
+    if (rc) {
+        fprintf(stderr, "unpause failed (rc=%d)\n", rc);
+        return EXIT_FAILURE;
+    }
 
     return EXIT_SUCCESS;
 }
