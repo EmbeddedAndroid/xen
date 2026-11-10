@@ -241,6 +241,29 @@ fail:
 }
 
 /*
+ * Allocate 2^order pages for a direct-mapped hwdom under the smallest
+ * address limit (2^min_bits or more) the heap can serve. Without a limit
+ * the heap serves the highest bank first, which can sit beyond what the
+ * devices can address, leaving the hwdom's DMA buffers out of their reach.
+ */
+static struct page_info * __init alloc_11_lowest(struct domain *d,
+                                                 unsigned int order,
+                                                 unsigned int min_bits)
+{
+    unsigned int bits = max(min_bits, order + PAGE_SHIFT);
+    struct page_info *pg;
+
+    for ( ; bits <= PADDR_BITS; bits++ )
+    {
+        pg = alloc_domheap_pages(d, order, MEMF_bits(bits));
+        if ( pg )
+            return pg;
+    }
+
+    return NULL;
+}
+
+/*
  * This is all pretty horrible.
  *
  * Requirements:
@@ -363,8 +386,8 @@ static void __init allocate_memory_11(struct domain *d,
     order = get_allocation_size(kinfo->unassigned_mem);
     while ( kinfo->unassigned_mem && mem->nr_banks < mem->max_banks )
     {
-        pg = alloc_domheap_pages(d, order,
-                                 lowmem ? MEMF_bits(lowmem_bitsize) : 0);
+        pg = lowmem ? alloc_domheap_pages(d, order, MEMF_bits(lowmem_bitsize))
+                    : alloc_11_lowest(d, order, lowmem_bitsize + 1);
         if ( !pg )
         {
             order --;
