@@ -97,6 +97,14 @@ _hidden
 int libxl__arch_hvm_unmap_gsi(libxl__gc *gc, uint32_t sbdf, uint32_t domid);
 _hidden
 bool libxl__arch_local_domain_has_pirq_notion(libxl__gc *gc);
+
+/*
+ * Type of a domain with an HVM container whose type libxl did not record,
+ * because libxl did not create it (dom0less, hyperlaunch).
+ */
+_hidden
+libxl_domain_type libxl__arch_unrecorded_domain_type(void);
+
 #if defined(__i386__) || defined(__x86_64__)
 
 #define LAPIC_BASE_ADDRESS  0xfee00000

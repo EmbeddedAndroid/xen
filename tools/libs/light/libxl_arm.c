@@ -1939,6 +1939,12 @@ bool libxl__arch_local_domain_has_pirq_notion(libxl__gc *gc)
     return true;
 }
 
+libxl_domain_type libxl__arch_unrecorded_domain_type(void)
+{
+    /* Arm guests are always PVH. */
+    return LIBXL_DOMAIN_TYPE_PVH;
+}
+
 /*
  * Local variables:
  * mode: C

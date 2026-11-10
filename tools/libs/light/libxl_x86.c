@@ -919,6 +919,11 @@ bool libxl__arch_local_domain_has_pirq_notion(libxl__gc *gc)
     return false;
 }
 
+libxl_domain_type libxl__arch_unrecorded_domain_type(void)
+{
+    return LIBXL_DOMAIN_TYPE_HVM;
+}
+
 int libxl__arch_hvm_map_gsi(libxl__gc *gc, uint32_t sbdf, uint32_t domid)
 {
     int pirq = -1, gsi, r;
