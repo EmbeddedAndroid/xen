@@ -191,6 +191,96 @@ In dom0, after xenstored and xen-init-dom0:
 - The same guest can be recreated after `xl destroy` with `xl create -p`
   and `device_tree = "g1-pt.dtb"`, `vuart = "sbsa_uart"`, `nr_spis = 12`,
   then QEMU and `xl unpause` as above.
+- QEMU up to 11.1 releases the vring grant mappings of a reset virtio
+  device through `call_rcu()`, after it has completed the reset ioreq. A
+  guest that unbinds and rebinds the driver finds a grant still mapped,
+  Linux disables grant DMA for the device and the rebind fails with
+  -ENOMEM. The backend has to finish those unmaps (drain the RCU
+  callbacks) before it completes the reset ioreq.
+
+## A Zephyr real-time domain
+
+A Zephyr domain (board `xenvm/xenvm/gicv3`) gets a CPU of its own in a
+boot-time cpupool with the null scheduler, a static event channel to
+dom0 and a virtio-console from QEMU in dom0:
+
+```
+chosen {
+	rt_pool: cpupool-rt {
+		compatible = "xen,cpupool";
+		cpupool-cpus = <&{/cpus/cpu@20500}>;
+		cpupool-sched = "null";
+	};
+
+	ec_d0: evtchn@20 {
+		compatible = "xen,evtchn-v1";
+		xen,evtchn = <20 &ec_rt>;
+	};
+
+	rt {
+		compatible = "xen,domain";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		memory = <0 32768>;
+		cpus = <1>;
+		vpl011;
+		xen,enhanced = "no-xenstore";
+		nr_spis = <12>;
+		start-paused;
+		domain-cpupool = <&rt_pool>;
+		virtio-mmio = <1>;
+
+		ec_rt: evtchn@10 {
+			compatible = "xen,evtchn-v1";
+			xen,evtchn = <10 &ec_d0>;
+		};
+
+		module@1 {
+			compatible = "multiboot,kernel", "multiboot,module";
+			xen,uefi-binary = "rt-zephyr.bin";
+		};
+	};
+};
+```
+
+- Zephyr's devicetree is built in, so the application overlay describes
+  what Xen provides: vpl011 as `arm,sbsa-uart` at 0x22000000 (SPI 0) and
+  one `virtio,mmio` transport at 0x02000000 (SPI 1, edge) with a
+  `virtio,console` child.
+- Zephyr has no grant DMA, so there is no `virtio-grant-dma`; QEMU maps
+  the domain's memory (foreign mapping) and runs without
+  `iommu_platform=on`.
+- Without `BOOT_TIME_CPUPOOLS` Xen ignores `cpupool-rt` and
+  `domain-cpupool` without a message. The static event channel needs
+  `xen,evtchn-v1`; any other compatible is skipped silently as well.
+- dom0 binds its end with `IOCTL_EVTCHN_BIND_STATIC` on `/dev/xen/evtchn`.
+- vpl011 output traps to Xen and drains at the UART rate; a 160 byte
+  line stalls the domain's vCPU for about 14 ms. Keep periodic output
+  off vpl011. Measured on the Ride with dom0 running 8 busy loops, a
+  1 ms timer over 600 s: worst deviation 85 us with no vpl011 output,
+  10971 us with a vpl011 line every 10 s, and 1060832 us for a domain
+  in Pool-0 with dom0 (also with a vpl011 line every 10 s).
+- The domain is only as available as its device model, and a backend
+  crash means restarting the domain. Xen destroys an ioreq server only
+  on `XEN_DMOP_destroy_ioreq_server` from the emulating domain
+  (`ioreq_server_destroy()` in `xen/common/ioreq.c`) or when the target
+  domain is destroyed (`ioreq_server_destroy_all()`), and libxl watches
+  QEMU only until it confirms startup (`libxl__spawn_spawn()`,
+  `device_model_confirm()`). After QEMU dies, the domain's next access to
+  the virtio-mmio window is sent to the dead server and the vCPU waits in
+  `wait_for_io()` for a response that never comes. No abort is injected;
+  on a single vCPU domain the timer and the event channel stop with it.
+  Destroying the dead server from dom0 does not help: it closes the
+  vCPU's ioreq event channel without a notification, and only a
+  notification wakes a vCPU waiting in Xen.
+  Destroy the domain and start it again with a new QEMU. Static event
+  channels exist only for domains Xen builds at boot, so a toolstack
+  rebuild of this domain has none; its full configuration comes back
+  with a host reboot.
+- A domain booted with no device model at all and
+  `trap-unmapped-accesses = <0>` reads zeros from the window. Zephyr's
+  virtio-mmio driver rejects the magic, but `uart_virtio_console` still
+  reports ready; check the transport device as well.
 
 ## Tests
 
