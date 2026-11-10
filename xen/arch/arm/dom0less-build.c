@@ -216,6 +216,96 @@ static int __init make_vpl011_uart_node(struct kernel_info *kinfo)
 }
 #endif
 
+/*
+ * Same layout as libxl gives xl guests and QEMU's xenpvh machine emulates:
+ * one transport per GUEST_VIRTIO_MMIO_DEV_SIZE from GUEST_VIRTIO_MMIO_BASE,
+ * one SPI each from GUEST_VIRTIO_MMIO_SPI_FIRST.
+ */
+static int __init make_virtio_mmio_nodes(struct kernel_info *kinfo)
+{
+    void *fdt = kinfo->fdt;
+    uint32_t iommu = 0;
+    unsigned int i;
+    int res;
+
+    if ( kinfo->arch.virtio_grant_dma )
+    {
+        /* See Linux Documentation/devicetree/bindings/iommu/xen,grant-dma.yaml */
+        iommu = alloc_phandle(kinfo);
+        if ( !iommu )
+            return -FDT_ERR_NOPHANDLES;
+
+        res = fdt_begin_node(fdt, "xen-grant-dma");
+        if ( res )
+            return res;
+
+        res = fdt_property_string(fdt, "compatible", "xen,grant-dma");
+        if ( res )
+            return res;
+
+        res = fdt_property_cell(fdt, "#iommu-cells", 1);
+        if ( res )
+            return res;
+
+        res = fdt_property_cell(fdt, "phandle", iommu);
+        if ( res )
+            return res;
+
+        res = fdt_end_node(fdt);
+        if ( res )
+            return res;
+    }
+
+    for ( i = 0; i < kinfo->arch.virtio_mmio; i++ )
+    {
+        paddr_t base = GUEST_VIRTIO_MMIO_BASE + i * GUEST_VIRTIO_MMIO_DEV_SIZE;
+        __be32 reg[GUEST_ROOT_ADDRESS_CELLS + GUEST_ROOT_SIZE_CELLS];
+        __be32 *cells = &reg[0];
+        gic_interrupt_t intr;
+
+        res = domain_fdt_begin_node(fdt, "virtio", base);
+        if ( res )
+            return res;
+
+        res = fdt_property_string(fdt, "compatible", "virtio,mmio");
+        if ( res )
+            return res;
+
+        dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS,
+                           GUEST_ROOT_SIZE_CELLS, base,
+                           GUEST_VIRTIO_MMIO_DEV_SIZE);
+        res = fdt_property(fdt, "reg", reg, sizeof(reg));
+        if ( res )
+            return res;
+
+        set_interrupt(intr, GUEST_VIRTIO_MMIO_SPI_FIRST + i, 0xf,
+                      DT_IRQ_TYPE_EDGE_RISING);
+        res = fdt_property_interrupts(kinfo, &intr, 1);
+        if ( res )
+            return res;
+
+        res = fdt_property(fdt, "dma-coherent", NULL, 0);
+        if ( res )
+            return res;
+
+        if ( iommu )
+        {
+            __be32 iommus[2] = { cpu_to_fdt32(iommu),
+                                 cpu_to_fdt32(kinfo->arch.virtio_backend) };
+
+            res = fdt_property(fdt, "iommus", iommus, sizeof(iommus));
+            if ( res )
+                return res;
+        }
+
+        res = fdt_end_node(fdt);
+        if ( res )
+            return res;
+    }
+
+    return 0;
+}
+
 int __init make_arch_nodes(struct kernel_info *kinfo)
 {
     int ret;
@@ -232,6 +322,74 @@ int __init make_arch_nodes(struct kernel_info *kinfo)
         if ( ret )
             return -EINVAL;
     }
+
+    if ( make_virtio_mmio_nodes(kinfo) )
+        return -EINVAL;
+
+    return 0;
+}
+
+int __init init_virtio_mmio(struct domain *d, struct kernel_info *kinfo,
+                            const struct dt_device_node *node)
+{
+    unsigned int max = GUEST_VIRTIO_MMIO_SPI_LAST -
+                       GUEST_VIRTIO_MMIO_SPI_FIRST + 1;
+    bool grant_dma = dt_find_property(node, "virtio-grant-dma", NULL);
+    uint32_t nr;
+
+    if ( !dt_property_read_u32(node, "virtio-mmio", &nr) )
+    {
+        if ( grant_dma )
+        {
+            printk(XENLOG_ERR "%pd: virtio-grant-dma without virtio-mmio\n", d);
+            return -EINVAL;
+        }
+
+        return 0;
+    }
+
+    if ( !nr || nr > max )
+    {
+        printk(XENLOG_ERR "%pd: virtio-mmio must be 1 to %u\n", d, max);
+        return -EINVAL;
+    }
+
+    /* The window and SPIs are guest layout; a 1:1 domain has the host's. */
+    if ( is_domain_direct_mapped(d) )
+    {
+        printk(XENLOG_ERR "%pd: virtio-mmio is not supported with direct-map\n",
+               d);
+        return -EINVAL;
+    }
+
+    if ( GUEST_VIRTIO_MMIO_SPI_FIRST + nr > vgic_num_irqs(d) )
+    {
+        printk(XENLOG_ERR "%pd: nr_spis does not cover the virtio-mmio SPIs\n",
+               d);
+        return -EINVAL;
+    }
+
+    if ( grant_dma )
+    {
+        /* The guest only uses grants when Xen advertises itself. */
+        if ( !(kinfo->dom0less_feature & DOM0LESS_ENHANCED_NO_XS) )
+        {
+            printk(XENLOG_ERR "%pd: virtio-grant-dma needs xen,enhanced\n", d);
+            return -EINVAL;
+        }
+
+        if ( !dt_property_read_u32(node, "virtio-grant-dma",
+                                   &kinfo->arch.virtio_backend) )
+        {
+            printk(XENLOG_ERR "%pd: virtio-grant-dma needs a backend domid\n",
+                   d);
+            return -EINVAL;
+        }
+
+        kinfo->arch.virtio_grant_dma = true;
+    }
+
+    kinfo->arch.virtio_mmio = nr;
 
     return 0;
 }

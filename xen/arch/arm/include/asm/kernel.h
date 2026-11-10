@@ -16,6 +16,11 @@ struct arch_kernel_info
 {
     /* Enable pl011 emulation */
     bool vpl011;
+
+    /* virtio-mmio transports to describe, and the backend for grant DMA */
+    unsigned int virtio_mmio;
+    bool virtio_grant_dma;
+    uint32_t virtio_backend;
 };
 
 #define arch_hwdom_first_bank_can_fit_modules \

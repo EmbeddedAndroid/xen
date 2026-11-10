@@ -869,6 +869,10 @@ static int __init construct_domU(struct kernel_info *kinfo,
         if ( rc < 0 )
             return rc;
 
+        rc = init_virtio_mmio(d, kinfo, node);
+        if ( rc < 0 )
+            return rc;
+
         rc = prepare_dtb_domU(d, kinfo);
         if ( rc < 0 )
             return rc;

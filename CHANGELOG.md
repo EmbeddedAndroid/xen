@@ -21,6 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
      driver.
    - The dom0less "start-paused" property, to keep a domain paused until
      the control domain unpauses it.
+   - The dom0less "virtio-mmio" and "virtio-grant-dma" properties, to
+     describe virtio-mmio devices emulated by a device model in another
+     domain.
 
 ### Removed
  - On Arm:

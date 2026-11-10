@@ -244,6 +244,26 @@ with the following properties:
 
     The default is 1 when trap-unmapped-accesses is absent.
 
+- virtio-mmio
+
+    Optional. A 32-bit integer, 1 to 11: the number of virtio-mmio
+    transports Xen describes in the domain's device tree, laid out as the
+    toolstack does for its guests: 0x200 bytes each from
+    GUEST_VIRTIO_MMIO_BASE, edge-triggered SPIs from
+    GUEST_VIRTIO_MMIO_SPI_FIRST, dma-coherent. Xen only describes them; a
+    device model in another domain (QEMU's xenpvh machine, for example)
+    must register an ioreq server for the window before the domain probes
+    it, which "start-paused" allows. Not valid for direct-mapped domains.
+    nr_spis, when given, must cover the last virtio SPI.
+
+- virtio-grant-dma
+
+    Optional. A 32-bit integer: the domain ID of the virtio backend. When
+    present with virtio-mmio, Xen adds a "xen,grant-dma" node and points
+    each virtio-mmio node's "iommus" at it with this domain ID, so the
+    guest grants its DMA buffers to the backend instead of exposing all of
+    its memory. Needs xen,enhanced.
+
 - start-paused
 
     Optional. A boolean property. When present, Xen builds the domain but

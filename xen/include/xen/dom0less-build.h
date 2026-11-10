@@ -60,6 +60,9 @@ int arch_parse_dom0less_node(struct dt_device_node *node,
 int init_vuart(struct domain *d, struct kernel_info *kinfo,
                const struct dt_device_node *node);
 
+int init_virtio_mmio(struct domain *d, struct kernel_info *kinfo,
+                     const struct dt_device_node *node);
+
 int make_intc_domU_node(struct kernel_info *kinfo);
 int make_arch_nodes(struct kernel_info *kinfo);
 

@@ -16,6 +16,18 @@ int __init init_vuart(struct domain *d, struct kernel_info *kinfo,
     return 0;
 }
 
+int __init init_virtio_mmio(struct domain *d, struct kernel_info *kinfo,
+                            const struct dt_device_node *node)
+{
+    if ( dt_find_property(node, "virtio-mmio", NULL) )
+    {
+        printk(XENLOG_ERR "%pd: virtio-mmio is not supported\n", d);
+        return -EOPNOTSUPP;
+    }
+
+    return 0;
+}
+
 int __init init_intc_phandle(struct kernel_info *kinfo, const char *name,
                              const int node_next, const void *pfdt)
 {
