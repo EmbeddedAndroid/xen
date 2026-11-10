@@ -291,11 +291,13 @@ and runs `xl`:
 
 ```
 chosen {
-	xen,dom0-capabilities = <0xe>;	/* HARDWARE | XENSTORE | DEVICE_MODEL */
+	/* HARDWARE | XENSTORE | DEVICE_MODEL | NOT_HYPERCALL_TARGET */
+	xen,dom0-capabilities = <0x1e>;
 
 	ctl {
 		compatible = "xen,domain";
 		capabilities = <0x1>;		/* CONTROL */
+		hypercall-untargetable;
 		xen,enhanced = "enabled";
 		...
 		module@0 {
@@ -325,9 +327,23 @@ chosen {
 - dom0 cannot `xl list`, pause or create domains (no sysctl, no
   domctl); it can still read single domains as the xenstore domain and
   use the Xen console.
-- Isolation is coarse with SILO and the dummy policy: `ctl` may
-  foreign-map any domain (control), and dom0 may foreign-map any domain
-  as the device-model domain. Tighter separation needs Flask.
+- With SILO and the dummy policy alone, `ctl` may foreign-map any
+  domain (control) and dom0 any domain (device model). dom0 and `ctl`
+  are therefore made untargetable (XEN_DOMCTL_CDF_not_hypercall_target):
+  dom0 adds 0x10 to `xen,dom0-capabilities` (0x1e) and `ctl` carries
+  `hypercall-untargetable`. Neither can then foreign-map the other
+  (EPERM), and Xen refuses domctls and dm_ops aimed at them the same
+  way; `ctl` still lists both in `xl list`.
+- A guest served by dom0's QEMU must stay targetable: the ioreq server,
+  dm_op and the device model's mappings all target it, so dom0 can
+  still map `g1` and `rt`. An untargetable guest gets no device model
+  (QEMU warns "failed to create ioreq server" and every interrupt
+  injection fails). Allowing dm_op while denying the foreign map needs
+  Flask.
+- Xen allocates static event channels under /chosen on dom0's side as
+  the idle domain, which an untargetable dom0 refuses: such a dom0
+  cannot have static event channels, so `rt`'s heartbeat channel and an
+  untargetable dom0 are mutually exclusive.
 
 ## Tests
 
