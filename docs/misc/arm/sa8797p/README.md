@@ -117,6 +117,78 @@ expect the Image at `/esp/EFI/BOOT/Image` and the initramfs at
 The guest init prints `NXDOMU-UP`, `NXDOMU-FFA <name> ffa=<0|1>
 optee=<0|1> tee0=<0|1>` and, on the way down, `NXDOMU-DOWN`.
 
+## dom0less guests with virtio devices
+
+dom0 keeps every Nord device and serves disk, network and console to
+dom0less guests as virtio-mmio devices emulated by QEMU (machine
+`xenpvh`), with the guests granting their DMA buffers to dom0
+(`xen,grant-dma`). The guests are described in `/chosen` of the DTB that
+`bootaa64.cfg` names; the EFI stub loads each module from the ESP:
+
+```
+chosen {
+	xen,uefi-cfg-load;
+
+	g1 {
+		compatible = "xen,domain";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		memory = <0 524288>;
+		cpus = <2>;
+		vpl011;
+		xen,enhanced = "no-xenstore";
+		start-paused;
+		virtio-mmio = <3>;
+		virtio-grant-dma = <0>;
+
+		module@1 {
+			compatible = "multiboot,kernel", "multiboot,module";
+			xen,uefi-binary = "g-Image";
+			bootargs = "console=ttyAMA0";
+		};
+		module@2 {
+			compatible = "multiboot,ramdisk", "multiboot,module";
+			xen,uefi-binary = "g-initrd";
+		};
+	};
+};
+```
+
+Xen writes three virtio-mmio nodes (0x200 bytes each from 0x02000000,
+SPIs 33 to 35) and a `xen,grant-dma` node pointing them at dom0 (domid 0).
+The same nodes can instead come from a passthrough partial DT
+(`multiboot,device-tree` module) as libxl writes them for xl guests; its
+phandles must then stay below 65000 (Xen allocates its own above the
+partial DT's highest one and refuses an overlap) and `nr_spis` must
+cover the last virtio SPI.
+
+In dom0, after xenstored and xen-init-dom0:
+
+    qemu-system-aarch64 -xen-domid 1 -xen-attach -M xenpvh -m 512 \
+        -smp 2,maxcpus=2 -nodefaults -display none -no-shutdown \
+        -global virtio-mmio.force-legacy=false \
+        -drive if=none,id=d0,file=g1.img,format=raw,cache=writeback \
+        -device virtio-blk-device,drive=d0,iommu_platform=on \
+        -netdev tap,id=n0,ifname=tap1,script=no,downscript=no \
+        -device virtio-net-device,netdev=n0,iommu_platform=on \
+        -chardev file,id=c0,path=g1-con.log \
+        -device virtio-serial-device,iommu_platform=on \
+        -device virtconsole,chardev=c0 &
+    xl unpause 1
+
+- `start-paused` keeps the guest from probing its virtio devices before
+  QEMU has registered its ioreq server; without it the first access
+  aborts the guest (or, with `trap-unmapped-accesses = <0>`, Linux reads
+  0xffffffff, logs "Wrong magic value" and never probes the device).
+- Grant DMA in Linux needs modern virtio (`force-legacy=false`, QEMU's
+  virtio-mmio default is legacy) and `VIRTIO_F_ACCESS_PLATFORM`
+  (`iommu_platform=on`); the guest kernel needs `CONFIG_XEN_VIRTIO`.
+- QEMU for dom0: `--target-list=aarch64-softmmu --enable-xen`, with TCG
+  left enabled: without a TCG machine nothing selects the virtio devices.
+- The same guest can be recreated after `xl destroy` with `xl create -p`
+  and `device_tree = "g1-pt.dtb"`, `vuart = "sbsa_uart"`, `nr_spis = 12`,
+  then QEMU and `xl unpause` as above.
+
 ## Tests
 
 The scripts in `tests/` run in dom0 and print one
