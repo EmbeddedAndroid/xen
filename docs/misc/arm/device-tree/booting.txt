@@ -131,6 +131,27 @@ A Xen-aware bootloader would set xen,xen-bootargs for Xen, xen,dom0-bootargs
 for Dom0 and bootargs for native Linux.
 
 
+Dom0 capabilities
+=================
+
+A dom0 booted the traditional way (kernel module directly under /chosen)
+has the control, hardware and xenstore capabilities. The optional property
+xen,dom0-capabilities directly under /chosen narrows this for a
+disaggregated system whose control or xenstore domain is a dom0less domain
+(see "capabilities" in the dom0less section). It is a 32-bit integer with
+the same bits as "capabilities" and must include DOMAIN_CAPS_HARDWARE: dom0
+always remains the hardware domain. Without DOMAIN_CAPS_CONTROL dom0 may
+still use the Xen console. Xen panics at boot on an invalid value.
+
+Example: dom0 owns the hardware, runs xenstored and the device models, and
+a dom0less domain with capabilities = <0x1> is the control domain:
+
+	chosen {
+		xen,dom0-capabilities = <0xe>;
+		...
+	};
+
+
 UEFI boot and DT
 ================
 
@@ -184,6 +205,8 @@ with the following properties:
     0x1 DOMAIN_CAPS_CONTROL  - A privileged, control domain
     0x2 DOMAIN_CAPS_HARDWARE - The hardware domain - there can be only 1
     0x4 DOMAIN_CAPS_XENSTORE - The xenstore domain - there can be only 1
+    0x8 DOMAIN_CAPS_DEVICE_MODEL - Runs device models (dm_op, foreign
+                                   mapping) for other domains
 
     The default is no capabilities.
 

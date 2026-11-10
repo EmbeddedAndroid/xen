@@ -44,6 +44,8 @@
 #include <asm/grant_table.h>
 #include <xen/serial.h>
 
+#include <public/bootfdt.h>
+
 static unsigned int __initdata opt_dom0_max_vcpus;
 integer_param("dom0_max_vcpus", opt_dom0_max_vcpus);
 
@@ -2251,9 +2253,31 @@ void __init create_dom0(void)
         .max_maptrack_frames = -1,
         .grant_opts = XEN_DOMCTL_GRANT_version(opt_gnttab_max_version),
     };
-    unsigned int flags = CDF_privileged | CDF_hardware;
+    unsigned int flags = CDF_hardware;
+    const struct dt_device_node *chosen = dt_find_node_by_path("/chosen");
+    uint32_t caps = DOMAIN_CAPS_CONTROL | DOMAIN_CAPS_HARDWARE |
+                    DOMAIN_CAPS_XENSTORE;
     domid_t domid;
     int rc;
+
+    if ( chosen &&
+         dt_property_read_u32(chosen, "xen,dom0-capabilities", &caps) )
+    {
+        if ( (caps & ~DOMAIN_CAPS_MASK) || !(caps & DOMAIN_CAPS_HARDWARE) )
+            panic("Invalid xen,dom0-capabilities (%#"PRIx32")\n", caps);
+
+        /*
+         * Only when asked for: xenstored takes its own domid from this
+         * flag, and falls back to the control domain without it.
+         */
+        if ( caps & DOMAIN_CAPS_XENSTORE )
+            dom0_cfg.flags |= XEN_DOMCTL_CDF_xs_domain;
+    }
+
+    if ( caps & DOMAIN_CAPS_CONTROL )
+        flags |= CDF_privileged;
+    if ( caps & DOMAIN_CAPS_DEVICE_MODEL )
+        dom0_cfg.flags |= XEN_DOMCTL_CDF_device_model;
 
     /* The vGIC for DOM0 is exactly emulating the hardware GIC */
     dom0_cfg.arch.gic_version = gic_domctl_hw_version();
@@ -2291,11 +2315,18 @@ void __init create_dom0(void)
     if ( vcpu_create(dom0, 0) == NULL )
         panic("Error creating %pdv0\n", dom0);
 
+    /* Without the control capability console_io needs is_console. */
+    if ( !(caps & DOMAIN_CAPS_CONTROL) )
+        dom0->is_console = true;
+
     rc = construct_dom0(dom0);
     if ( rc )
         panic("Could not set up %pd guest OS (rc = %d)\n", dom0, rc);
 
-    set_xs_domain(dom0);
+    if ( caps & DOMAIN_CAPS_XENSTORE )
+        set_xs_domain(dom0);
+
+    printk("%pd capabilities %#"PRIx32"\n", dom0, caps);
 }
 
 /*
