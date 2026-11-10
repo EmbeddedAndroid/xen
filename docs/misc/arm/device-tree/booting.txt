@@ -601,15 +601,15 @@ To enable the event-channel interface for domU guests include the
 xen,enhanced = "no-xenstore" property in the domU Xen device tree node.
 
 Under the "xen,domain" compatible node for domU, there needs to be sub-nodes
-with compatible "xen,evtchn" that describe the event channel connection
+with compatible "xen,evtchn-v1" that describe the event channel connection
 between two domUs. For dom0, there needs to be sub-nodes with compatible
-"xen,evtchn" under the chosen node.
+"xen,evtchn-v1" under the chosen node.
 
 The static event channel node has the following properties:
 
 - compatible
 
-    "xen,evtchn"
+    "xen,evtchn-v1"
 
 - xen,evtchn
 
