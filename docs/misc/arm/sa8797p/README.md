@@ -282,6 +282,53 @@ chosen {
   virtio-mmio driver rejects the magic, but `uart_virtio_console` still
   reports ready; check the transport device as well.
 
+## A control domain apart from dom0
+
+dom0 keeps the hardware (construct_dom0() direct map, DMA placement and
+the FF-A mediator), xenstored and the QEMU device models, but not the
+control capability; a dom0less Linux domain `ctl` is the control domain
+and runs `xl`:
+
+```
+chosen {
+	xen,dom0-capabilities = <0xe>;	/* HARDWARE | XENSTORE | DEVICE_MODEL */
+
+	ctl {
+		compatible = "xen,domain";
+		capabilities = <0x1>;		/* CONTROL */
+		xen,enhanced = "enabled";
+		...
+		module@0 {
+			compatible = "multiboot,kernel", "multiboot,module";
+			bootargs = "console=ttyAMA0 xen_privcmd.unrestricted=1";
+			...
+		};
+	};
+};
+```
+
+- The Xen build defaults to the SILO XSM policy, which allows event
+  channels and grants between two domains only when one of them is
+  privileged; dom0 has to count as such without the control capability,
+  or QEMU cannot create its ioreq server for a guest.
+- Xen writes each dom0less domain's xenstore event channel into its
+  xenstore page; xenstored in dom0 introduces the domains from it at
+  start and takes `ctl` as its privileged domain (by its control
+  capability).
+- Linux in a domain that is not dom0 blocks every privcmd hypercall
+  unless xenstore names a target domain; `xen_privcmd.unrestricted=1`
+  lifts that for `ctl`.
+- dom0 is an ordinary xenstore client of its own xenstored, and
+  `init-dom0less` skips domain 0, so `ctl` sets up dom0's entries: it
+  runs `xen-init-dom0`, then `xenstore-chmod -r /local/domain/0 n0` so
+  that dom0, its kernel and its device models can write there.
+- dom0 cannot `xl list`, pause or create domains (no sysctl, no
+  domctl); it can still read single domains as the xenstore domain and
+  use the Xen console.
+- Isolation is coarse with SILO and the dummy policy: `ctl` may
+  foreign-map any domain (control), and dom0 may foreign-map any domain
+  as the device-model domain. Tighter separation needs Flask.
+
 ## Tests
 
 The scripts in `tests/` run in dom0 and print one
