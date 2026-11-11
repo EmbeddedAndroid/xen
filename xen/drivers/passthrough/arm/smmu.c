@@ -46,6 +46,7 @@
 #include <xen/linux-compat.h>
 #include <xen/list.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/vmap.h>
 #include <xen/rbtree.h>
 #include <xen/sched.h>
@@ -58,6 +59,15 @@
 #include <asm/platform.h>
 
 #include "smmu-fw.h"
+
+/*
+ * Keep the stream mappings a Qualcomm boot firmware leaves valid for the
+ * masters it has started (a DSP running from boot, for instance) as bypass.
+ * Off by default: a bypass stream reaches any physical address, Xen's own
+ * memory included.
+ */
+static bool __read_mostly opt_smmu_boot_bypass;
+boolean_param("smmu-boot-bypass", opt_smmu_boot_bypass);
 
 /* Xen: The below defines are redefined within the file. Undef it */
 #undef SCTLR_AFE
@@ -374,6 +384,7 @@ static struct iommu_group *iommu_group_get(struct device *dev)
 #define ARM_SMMU_GR0_ID6		0x38
 #define ARM_SMMU_GR0_ID7		0x3c
 #define ARM_SMMU_GR0_sGFSR		0x48
+#define sGFSR_USF			(1 << 1)
 #define ARM_SMMU_GR0_sGFSYNR0		0x50
 #define ARM_SMMU_GR0_sGFSYNR1		0x54
 #define ARM_SMMU_GR0_sGFSYNR2		0x58
@@ -612,6 +623,7 @@ struct arm_smmu_smr {
 	u16				mask;
 	u16				id;
 	bool				valid;
+	bool				boot;
 };
 
 struct arm_smmu_master_cfg {
@@ -674,6 +686,8 @@ struct arm_smmu_device {
 
 	/* Xen: SMRs and context banks the secure firmware programs */
 	bool				has_fw_slice;
+	unsigned int			boot_smrs;
+	bool				boot_hint_done;
 	struct smmu_fw_slice		fw_slice;
 };
 
@@ -1164,6 +1178,13 @@ static irqreturn_t arm_smmu_global_fault(int irq, void *dev)
 	dev_err_ratelimited(smmu->dev,
 		"\tGFSR 0x%08x, GFSYNR0 0x%08x, GFSYNR1 0x%08x, GFSYNR2 0x%08x\n",
 		gfsr, gfsynr0, gfsynr1, gfsynr2);
+	if ((gfsr & sGFSR_USF) && smmu->boot_smrs && !opt_smmu_boot_bypass &&
+	    !smmu->boot_hint_done) {
+		smmu->boot_hint_done = true;
+		dev_warn(smmu->dev,
+			 "unidentified stream 0x%x: boot firmware left %u stream mappings, \"smmu-boot-bypass\" keeps them\n",
+			 gfsynr1 & 0xffff, smmu->boot_smrs);
+	}
 
 	writel(gfsr, gr0_base + ARM_SMMU_GR0_sGFSR);
 	return IRQ_HANDLED;
@@ -1692,6 +1713,34 @@ static bool arm_smmu_free_sme(struct arm_smmu_device *smmu, int idx)
 	return true;
 }
 
+/*
+ * A boot mapping kept by "smmu-boot-bypass" that no master uses must not
+ * stop a device tree master from getting its own entry: drop every unused
+ * boot mapping that overlaps id/mask. Returns whether any was dropped.
+ */
+static bool arm_smmu_drop_boot_smes(struct arm_smmu_device *smmu, u16 id,
+				    u16 mask, struct device *dev)
+{
+	struct arm_smmu_smr *smrs = smmu->smrs;
+	bool dropped = false;
+	int i;
+
+	for (i = 0; smrs && i < smmu->num_mapping_groups; ++i) {
+		if (!smrs[i].valid || !smrs[i].boot || smmu->s2crs[i].count ||
+		    ((id ^ smrs[i].id) & ~(smrs[i].mask | mask)))
+			continue;
+		dev_warn(smmu->dev,
+			 "boot stream mapping %d (id 0x%x mask 0x%x) released for %s\n",
+			 i, smrs[i].id, smrs[i].mask, dev_name(dev));
+		smrs[i] = (struct arm_smmu_smr){};
+		smmu->s2crs[i] = s2cr_init_val;
+		arm_smmu_write_sme(smmu, i);
+		dropped = true;
+	}
+
+	return dropped;
+}
+
 static int arm_smmu_master_alloc_smes(struct device *dev)
 {
 	struct arm_smmu_master_cfg *cfg = find_smmu_master_cfg(dev);
@@ -1711,14 +1760,30 @@ static int arm_smmu_master_alloc_smes(struct device *dev)
 		}
 
 		ret = arm_smmu_find_sme(smmu, fwspec->ids[i], mask);
+		if (ret == -EINVAL &&
+		    arm_smmu_drop_boot_smes(smmu, fwspec->ids[i], mask, dev))
+			ret = arm_smmu_find_sme(smmu, fwspec->ids[i], mask);
 		if (ret < 0)
 			goto out_err;
 
 		idx = ret;
 		if (smrs && smmu->s2crs[idx].count == 0) {
+			/*
+			 * Taking over a boot mapping narrows it to this
+			 * master's ID and mask: other streams it covered
+			 * become unidentified.
+			 */
+			if (smrs[idx].boot)
+				dev_warn(smmu->dev,
+					 "boot stream mapping %d (id 0x%x mask 0x%x) taken over by %s\n",
+					 idx, smrs[idx].id, smrs[idx].mask,
+					 dev_name(dev));
 			smrs[idx].id = fwspec->ids[i];
 			smrs[idx].mask = mask;
 			smrs[idx].valid = true;
+			if (smrs[idx].boot)
+				smmu->s2crs[idx] = s2cr_init_val;
+			smrs[idx].boot = false;
 		}
 		smmu->s2crs[idx].count++;
 		cfg->smendx[i] = (s16)idx;
@@ -2359,10 +2424,55 @@ static void arm_smmu_fw_slice_probe(struct arm_smmu_device *smmu)
 		   s->nr_streams);
 }
 
+static bool arm_smmu_has_boot_smrs(const struct arm_smmu_device *smmu)
+{
+	const struct dt_device_node *np = dev_to_dt(smmu->dev);
+
+	return dt_device_is_compatible(np, "qcom,smmu-500") &&
+	       !dt_device_is_compatible(np, "qcom,adreno-smmu");
+}
+
+/*
+ * Turn the boot mappings read by arm_smmu_device_cfg_probe() into bypass
+ * entries. Runs after the firmware slice probe: entries the slice owns
+ * belong to the firmware and are left alone.
+ */
+static void arm_smmu_keep_boot_smes(struct arm_smmu_device *smmu,
+				    unsigned int groups)
+{
+	unsigned int i;
+
+	for (i = 0; smmu->smrs && i < groups; i++) {
+		if (!smmu->smrs[i].boot)
+			continue;
+		if (i >= smmu->num_mapping_groups) {
+			smmu->smrs[i] = (struct arm_smmu_smr){};
+			continue;
+		}
+		smmu->boot_smrs++;
+		if (!opt_smmu_boot_bypass) {
+			smmu->smrs[i].boot = false;
+			continue;
+		}
+		smmu->s2crs[i].type = S2CR_TYPE_BYPASS;
+		smmu->s2crs[i].privcfg = S2CR_PRIVCFG_DEFAULT;
+		smmu->s2crs[i].cbndx = 0xff;
+		dev_warn(smmu->dev,
+			 "boot stream mapping %u kept as bypass: id 0x%x mask 0x%x\n",
+			 i, smmu->smrs[i].id, smmu->smrs[i].mask);
+	}
+
+	if (smmu->boot_smrs && !opt_smmu_boot_bypass)
+		dev_notice(smmu->dev,
+			   "\t%u stream mappings left by the boot firmware dropped\n",
+			   smmu->boot_smrs);
+}
+
 static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 {
-	unsigned long size;
+	unsigned long size, smr_groups = 0;
 	void __iomem *gr0_base = ARM_SMMU_GR0(smmu);
+	bool boot_smrs;
 	u32 id;
 	int i;
 
@@ -2424,26 +2534,52 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 			return -ENODEV;
 		}
 
-		/*
-		 * SMR.ID bits may not be preserved if the corresponding MASK
-		 * bits are set, so check each one separately. We can reject
-		 * masters later if they try to claim IDs outside these masks.
-		 */
-		smr = smmu->streamid_mask << SMR_ID_SHIFT;
-		writel_relaxed(smr, gr0_base + ARM_SMMU_GR0_SMR(0));
-		smr = readl_relaxed(gr0_base + ARM_SMMU_GR0_SMR(0));
-		smmu->streamid_mask = smr >> SMR_ID_SHIFT;
-
-		smr = smmu->streamid_mask << SMR_MASK_SHIFT;
-		writel_relaxed(smr, gr0_base + ARM_SMMU_GR0_SMR(0));
-		smr = readl_relaxed(gr0_base + ARM_SMMU_GR0_SMR(0));
-		smmu->smr_mask_mask = smr >> SMR_MASK_SHIFT;
-
 		/* Zero-initialised to mark as invalid */
 		smmu->smrs = devm_kcalloc(smmu->dev, size, sizeof(*smmu->smrs),
 								GFP_KERNEL);
 		if (!smmu->smrs)
 			return -ENOMEM;
+		smr_groups = size;
+
+		/*
+		 * Read what the boot firmware left valid before the probe
+		 * below writes an SMR.
+		 */
+		boot_smrs = arm_smmu_has_boot_smrs(smmu);
+		for (i = 0; boot_smrs && i < size; i++) {
+			smr = readl_relaxed(gr0_base + ARM_SMMU_GR0_SMR(i));
+			if (!(smr & SMR_VALID))
+				continue;
+			smmu->smrs[i].boot = true;
+			if (!opt_smmu_boot_bypass)
+				continue;
+			smmu->smrs[i].id = (smr >> SMR_ID_SHIFT) & SMR_ID_MASK;
+			smmu->smrs[i].mask = (smr >> SMR_MASK_SHIFT) &
+					     SMR_MASK_MASK;
+			smmu->smrs[i].valid = true;
+		}
+
+		/*
+		 * SMR.ID bits may not be preserved if the corresponding MASK
+		 * bits are set, so check each one separately. We can reject
+		 * masters later if they try to claim IDs outside these masks.
+		 * Probe on an entry that is not kept from boot.
+		 */
+		for (i = 0; i < size && smmu->smrs[i].valid; i++)
+			;
+		if (i < size) {
+			smr = smmu->streamid_mask << SMR_ID_SHIFT;
+			writel_relaxed(smr, gr0_base + ARM_SMMU_GR0_SMR(i));
+			smr = readl_relaxed(gr0_base + ARM_SMMU_GR0_SMR(i));
+			smmu->streamid_mask = smr >> SMR_ID_SHIFT;
+
+			smr = smmu->streamid_mask << SMR_MASK_SHIFT;
+			writel_relaxed(smr, gr0_base + ARM_SMMU_GR0_SMR(i));
+			smr = readl_relaxed(gr0_base + ARM_SMMU_GR0_SMR(i));
+			smmu->smr_mask_mask = smr >> SMR_MASK_SHIFT;
+		} else {
+			smmu->smr_mask_mask = smmu->streamid_mask & SMR_MASK_MASK;
+		}
 
 		dev_notice(smmu->dev,
 			   "\tstream matching with %lu register groups, mask 0x%x",
@@ -2533,6 +2669,7 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 
 	smmu->num_hw_context_banks = smmu->num_context_banks;
 	arm_smmu_fw_slice_probe(smmu);
+	arm_smmu_keep_boot_smes(smmu, smr_groups);
 
 	return 0;
 }

@@ -2478,6 +2478,23 @@ Use `smep=hvm` to allow SMEP use by HVM guests only.
 In PV shim mode on AMD or Hygon hardware due to significant performance impact
 in some cases and generally lower security risk the option defaults to false.
 
+### smmu-boot-bypass (ARM)
+> `= <boolean>`
+
+> Default: `false`
+
+Keep the stream mappings that the boot firmware left valid on Qualcomm
+SMMUs (compatible "qcom,smmu-500", not the Adreno SMMU) as bypass
+entries; entries inside a secure firmware slice are left to the firmware. Some boot firmware
+starts masters, such as a DSP, before Xen runs; without this option Xen
+resets every stream mapping, and each access by such a master raises an
+unidentified stream fault.
+
+A bypass stream can reach any physical address, including Xen's memory
+and that of every domain. A kept mapping that a device tree master later
+overlaps is released, or taken over and narrowed to that master's IDs;
+both are logged.
+
 ### smt (x86)
 > `= <boolean>`
 

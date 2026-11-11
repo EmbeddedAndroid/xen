@@ -99,6 +99,12 @@ dtb=nord.dtb
   spins early in boot under Xen (root cause open).
 - `iommu=no` in `options=` runs Xen without its SMMU driver; dom0 is
   direct mapped either way.
+- `smmu-boot-bypass` in `options=` on boards whose boot firmware starts a
+  master before Xen: with XBL BOOT.XBL.3.1-00083 a DSP (SID 0x9e0) is
+  already running, and without the option every access it makes is an
+  unidentified stream fault and Xen never builds dom0. Boards on XBL
+  3.1-00095.1 boot without it. The kept streams bypass translation; see
+  docs/misc/xen-command-line.pandoc.
 - `conring_size=4M` keeps the Xen boot log in `xl dmesg` after a verbose
   dom0 boot.
 
