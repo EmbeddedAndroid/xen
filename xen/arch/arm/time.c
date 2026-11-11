@@ -262,6 +262,8 @@ static void htimer_interrupt(int irq, void *dev_id)
 
 static void vtimer_interrupt(int irq, void *dev_id)
 {
+    register_t ctl;
+
     /*
      * Edge-triggered interrupts can be used for the virtual timer. Even
      * if the timer output signal is masked in the context switch, the
@@ -277,8 +279,22 @@ static void vtimer_interrupt(int irq, void *dev_id)
 
     perfc_incr(virt_timer_irqs);
 
-    current->arch.virt_timer.ctl = READ_SYSREG(CNTV_CTL_EL0);
-    WRITE_SYSREG(current->arch.virt_timer.ctl | CNTx_CTL_MASK, CNTV_CTL_EL0);
+    /*
+     * The interrupt can also be taken while the loaded vCPU's timer is
+     * not firing. Masking that timer would leave it masked for good: the
+     * guest finds ISTATUS clear, treats the interrupt as spurious and
+     * never re-arms the timer.
+     */
+    ctl = READ_SYSREG(CNTV_CTL_EL0);
+    if ( (ctl & (CNTx_CTL_ENABLE | CNTx_CTL_MASK | CNTx_CTL_PENDING)) !=
+         (CNTx_CTL_ENABLE | CNTx_CTL_PENDING) )
+    {
+        perfc_incr(virt_timer_irqs_spurious);
+        return;
+    }
+
+    current->arch.virt_timer.ctl = ctl;
+    WRITE_SYSREG(ctl | CNTx_CTL_MASK, CNTV_CTL_EL0);
     vgic_inject_irq(current->domain, current, current->arch.virt_timer.irq, true);
 }
 
