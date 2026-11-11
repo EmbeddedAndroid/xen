@@ -957,6 +957,37 @@ static void shutdown_domain(struct domain *d)
 
 static unsigned enum_pass = 0;
 
+/*
+ * XEN_SYSCTL_getdomaininfolist needs the control capability. A hardware
+ * domain without it (split control and hardware domains) may still query
+ * one domain by id (XEN_DOMCTL_getdomaininfo needs the xenstore or device
+ * model capability), so take the ids from the domain homes in xenstore.
+ */
+static int getinfo_by_xenstore(xc_domaininfo_t *info)
+{
+	unsigned int num, n = 0;
+	char **dir = xs_directory(xs, XBT_NULL, "/local/domain", &num);
+
+	if (!dir) {
+		dolog(LOG_ERR, "Cannot list /local/domain: %d (%s)",
+		      errno, strerror(errno));
+		return -1;
+	}
+
+	for (unsigned int i = 0; i < num && n < DOMID_FIRST_RESERVED - 1; i++) {
+		char *end;
+		unsigned long domid = strtoul(dir[i], &end, 10);
+
+		if (*end || domid == 0 || domid >= DOMID_FIRST_RESERVED)
+			continue;
+		if (xc_domain_getinfo_single(xc, domid, &info[n]) == 0)
+			n++;
+	}
+
+	free(dir);
+	return n;
+}
+
 static void enum_domains(void)
 {
 	/*
@@ -972,6 +1003,8 @@ static void enum_domains(void)
 
 	/* Fetch info on every valid domain except for dom0 */
 	ret = xc_domain_getinfolist(xc, 1, DOMID_FIRST_RESERVED - 1, domaininfo);
+	if (ret < 0 && (errno == EPERM || errno == EACCES))
+		ret = getinfo_by_xenstore(domaininfo);
 	if (ret < 0)
 		return;
 
