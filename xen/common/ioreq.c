@@ -187,6 +187,14 @@ static bool wait_for_io(struct ioreq_vcpu *sv, ioreq_t *p)
                                       ({ state = p->state;
                                          smp_rmb();
                                          state != prev_state; }));
+            /*
+             * An unchanged state means the vCPU blocked, and the wait
+             * returns here on Arm: the server may have been destroyed
+             * meanwhile, freeing sv and unmapping the page p points into.
+             * Leave sv pending for the caller to look up again.
+             */
+            if ( state == prev_state )
+                return true;
             continue;
 
         default:

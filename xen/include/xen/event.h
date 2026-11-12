@@ -184,7 +184,13 @@ static bool evtchn_usable(const struct evtchn *evtchn)
     return evtchn->state > ECS_RESERVED;
 }
 
-/* Wait on a Xen-attached event channel. */
+/*
+ * Wait on a Xen-attached event channel. The condition is evaluated at most
+ * twice, both times before blocking, and never after the wait: a caller may
+ * rely on the condition having been false when the vCPU blocked (see
+ * wait_for_io()). On Arm the wait returns into the caller once the vCPU runs
+ * again.
+ */
 #define wait_on_xen_event_channel(port, condition)                      \
     do {                                                                \
         struct vcpu *v = current;                                       \
