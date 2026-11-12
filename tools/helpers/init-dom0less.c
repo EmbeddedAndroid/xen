@@ -235,12 +235,31 @@ err:
     return rc;
 }
 
+static void configure_libxl(struct xs_handle *xsh,
+                            struct xc_interface_core *xch,
+                            libxl_dominfo *info, uint64_t xenstore_pfn,
+                            uint64_t xenstore_evtchn)
+{
+    libxl_uuid uuid;
+    int rc;
+
+    libxl_uuid_generate(&uuid);
+    xc_domain_sethandle(xch, info->domid, libxl_uuid_bytearray(&uuid));
+
+    rc = gen_stub_json_config(info->domid, &uuid);
+    if (rc)
+        err(1, "gen_stub_json_config");
+
+    rc = create_xenstore(xsh, info, uuid, xenstore_pfn, xenstore_evtchn);
+    if (rc)
+        err(1, "writing to xenstore");
+}
+
 static int init_domain(struct xs_handle *xsh,
                        struct xc_interface_core *xch,
                        xenforeignmemory_handle *xfh,
                        libxl_dominfo *info)
 {
-    libxl_uuid uuid;
     uint64_t xenstore_evtchn, xenstore_pfn;
     int rc;
 
@@ -292,16 +311,7 @@ static int init_domain(struct xs_handle *xsh,
                err(1, "xc_dom_gnttab_seed");
     }
 
-    libxl_uuid_generate(&uuid);
-    xc_domain_sethandle(xch, info->domid, libxl_uuid_bytearray(&uuid));
-
-    rc = gen_stub_json_config(info->domid, &uuid);
-    if (rc)
-        err(1, "gen_stub_json_config");
-
-    rc = create_xenstore(xsh, info, uuid, xenstore_pfn, xenstore_evtchn);
-    if (rc)
-        err(1, "writing to xenstore");
+    configure_libxl(xsh, xch, info, xenstore_pfn, xenstore_evtchn);
 
     rc = xs_introduce_domain(xsh, info->domid, xenstore_pfn, xenstore_evtchn);
     if (!rc)
@@ -313,6 +323,51 @@ static int init_domain(struct xs_handle *xsh,
 static bool domain_exists(struct xs_handle *xsh, int domid)
 {
     return xs_is_domain_introduced(xsh, domid);
+}
+
+/* Check if libxl knows the domain: its type node is written last. */
+static bool libxl_configured(struct xs_handle *xsh, domid_t domid)
+{
+    char path[STR_MAX_LENGTH];
+    unsigned int len;
+    void *val;
+    int rc;
+
+    rc = snprintf(path, STR_MAX_LENGTH, "/libxl/%u/type", domid);
+    if (rc < 0 || rc >= STR_MAX_LENGTH)
+        return false;
+    val = xs_read(xsh, XBT_NULL, path, &len);
+    free(val);
+    return val != NULL;
+}
+
+/*
+ * A domain xenstored introduced on its own (its xenstore page and event
+ * channel came from Xen) is connected, but libxl has no configuration for
+ * it, so device hotplug to it fails. Give it the same configuration
+ * init_domain() gives the domains it introduces.
+ */
+static int init_introduced_domain(struct xs_handle *xsh,
+                                  struct xc_interface_core *xch,
+                                  libxl_dominfo *info)
+{
+    uint64_t xenstore_evtchn, xenstore_pfn;
+    int rc;
+
+    rc = xc_hvm_param_get(xch, info->domid, HVM_PARAM_STORE_EVTCHN,
+                          &xenstore_evtchn);
+    if (rc != 0) {
+        printf("Failed to get HVM_PARAM_STORE_EVTCHN\n");
+        return 1;
+    }
+    if (!xenstore_evtchn)
+        return 0;
+    if (get_xs_page(xch, info, &xenstore_pfn) != 0)
+        return 1;
+
+    printf("Configure libxl for introduced domain: %u\n", info->domid);
+    configure_libxl(xsh, xch, info, xenstore_pfn, xenstore_evtchn);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -359,6 +414,12 @@ int main(int argc, char **argv)
             rc = init_domain(xsh, xch, xfh, &info[i]);
             if (rc < 0) {
                 fprintf(stderr, "init_domain failed.\n");
+                goto out;
+            }
+        } else if (!libxl_configured(xsh, domid)) {
+            rc = init_introduced_domain(xsh, xch, &info[i]);
+            if (rc) {
+                fprintf(stderr, "init_introduced_domain failed.\n");
                 goto out;
             }
         } else {
