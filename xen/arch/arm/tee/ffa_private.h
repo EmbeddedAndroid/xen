@@ -17,18 +17,6 @@
 #include <xen/types.h>
 #include <asm/tee/ffa.h>
 
-/* Error codes */
-#define FFA_RET_OK                      0
-#define FFA_RET_NOT_SUPPORTED           -1
-#define FFA_RET_INVALID_PARAMETERS      -2
-#define FFA_RET_NO_MEMORY               -3
-#define FFA_RET_BUSY                    -4
-#define FFA_RET_INTERRUPTED             -5
-#define FFA_RET_DENIED                  -6
-#define FFA_RET_RETRY                   -7
-#define FFA_RET_ABORTED                 -8
-#define FFA_RET_NO_DATA                 -9
-
 /* FFA_VERSION helpers */
 #define FFA_VERSION_MAJOR_SHIFT         16U
 #define FFA_VERSION_MAJOR_MASK          GENMASK(14, 0)
@@ -242,7 +230,6 @@
 #define FFA_FEATURE_SCHEDULE_RECV_INTR  0x2U
 
 /* Function IDs */
-#define FFA_ERROR                       0x84000060U
 #define FFA_SUCCESS_32                  0x84000061U
 #define FFA_SUCCESS_64                  0xC4000061U
 #define FFA_INTERRUPT                   0x84000062U
@@ -259,10 +246,6 @@
 #define FFA_MSG_YIELD                   0x8400006CU
 #define FFA_RUN                         0x8400006DU
 #define FFA_MSG_SEND                    0x8400006EU
-#define FFA_MSG_SEND_DIRECT_REQ_32      0x8400006FU
-#define FFA_MSG_SEND_DIRECT_REQ_64      0xC400006FU
-#define FFA_MSG_SEND_DIRECT_RESP_32     0x84000070U
-#define FFA_MSG_SEND_DIRECT_RESP_64     0xC4000070U
 #define FFA_MEM_DONATE_32               0x84000071U
 #define FFA_MEM_DONATE_64               0xC4000071U
 #define FFA_MEM_LEND_32                 0x84000072U
