@@ -1083,6 +1083,29 @@ affinities to prefer but be not limited to the specified node(s).
 
 Pin dom0 vcpus to their respective pcpus
 
+### drtm-tpm (arm64)
+> `= <integer>`
+
+> Default: `0`
+
+Only available if Xen is compiled with CONFIG_ARM_DRTM.
+
+The FF-A endpoint ID of the secure world's TPM D-RTM endpoint. Set it when
+Xen is the Dynamically Launched Measured Environment (DLME) of an Arm DRTM
+dynamic launch: before any domain is created Xen records the SHA-256 digests
+of dom0's kernel, initrd (all zeroes without one) and command line as
+`TPM2_PCR_Event` data in PCR 19 at TPM locality 2 through that endpoint,
+then gives up locality 2 with `DRTM_CLOSE_LOCALITY` and checks that the
+endpoint refuses further measurements. Xen panics when the locality does not
+close, when the firmware does not implement `DRTM_CLOSE_LOCALITY` (no DRTM
+service, or upstream TF-A today), or when the endpoint does not refuse a
+measurement after the close (for instance a wrong endpoint ID). When the
+firmware implements it but there was no dynamic launch the locality is
+already closed and Xen only warns. PCR 19 describes dom0 only: a dom0less
+boot measures no domain, and domains started from the device tree next to
+dom0 are not measured (their images are boot modules, which the dynamic
+launch measured into PCR 18). Device tree boot only.
+
 ### dtuart (ARM, RISC-V)
 > `= path [:options]`
 

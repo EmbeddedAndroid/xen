@@ -269,6 +269,19 @@ config ARM64_BTI
 
 source "arch/arm/tee/Kconfig"
 
+config ARM_DRTM
+	bool "Arm DRTM dynamic launch: measure dom0 (UNSUPPORTED)" if UNSUPPORTED
+	depends on ARM_64
+	help
+	  Xen as the Dynamically Launched Measured Environment (DLME) of an
+	  Arm DRTM (DEN0113) dynamic launch: with "drtm-tpm=" on the command
+	  line, Xen records dom0's kernel, initrd and command line in TPM
+	  PCR 19 at locality 2 through the secure world's TPM D-RTM endpoint,
+	  then closes the locality with DRTM_CLOSE_LOCALITY before any domain
+	  runs.
+
+	  If unsure, say N.
+
 config PARTIAL_EMULATION
 	bool "Enable partial emulation of system/coprocessor registers"
 	default y

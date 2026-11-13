@@ -946,6 +946,14 @@ necessary. The FF-A mediator is not yet implemented for Arm32. Part of the
 FF-A specification is not supported, see the top comment in
 xen/arch/arm/tee/ffa.c for limitations.
 
+### Arm: DRTM dynamic launch measurement of dom0
+
+Xen started by an Arm DRTM (DEN0113) dynamic launch records dom0 in TPM
+PCR 19 through the secure world's TPM D-RTM endpoint and closes TPM
+locality 2 before any domain runs.
+
+    Status, Arm64: Experimental
+
 ### ARM: Guest Device Tree support
 
     Status: Supported

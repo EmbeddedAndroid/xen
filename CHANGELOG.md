@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
  - On Arm:
    - Support for the Qualcomm SA8797P (Nord) and the Qualcomm GENI UART
      driver.
+   - Experimental measurement of dom0 into TPM PCR 19 when Xen is started
+     by an Arm DRTM dynamic launch (CONFIG_ARM_DRTM, "drtm-tpm=").
 
 ### Removed
  - On Arm:

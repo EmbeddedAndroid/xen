@@ -46,6 +46,7 @@
 #include <asm/gic.h>
 #include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
+#include <asm/drtm.h>
 #include <asm/platform.h>
 #include <asm/procinfo.h>
 #include <asm/setup.h>
@@ -457,6 +458,9 @@ void asmlinkage __init noreturn start_xen(unsigned long fdt_paddr)
     enable_cpu_features();
 
     do_init_boottests();
+
+    /* Before a domain exists: DRTM gives up TPM locality 2 here */
+    drtm_measure_dom0();
 
     /* Create initial domain 0. */
     if ( !is_dom0less_mode() )
