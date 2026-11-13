@@ -28,6 +28,13 @@ int add_ext_regions(unsigned long s_gfn, unsigned long e_gfn, void *data);
 
 paddr_t hwdom_get_fdt_alloc_size(void);
 
+/*
+ * The command line of the hardware domain booted from a device tree, from
+ * "xen,dom0-bootargs" in /chosen, the kernel module, or "bootargs" in
+ * /chosen, in that order; NULL without one.
+ */
+const char *hwdom_bootargs(const char *module_cmdline);
+
 #if defined(CONFIG_MPU) && defined(CONFIG_ARM_64)
 /* Utility function to determine if an Armv8-R processor supports VMSA. */
 bool has_v8r_vmsa_support(void);

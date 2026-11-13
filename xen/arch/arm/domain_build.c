@@ -475,16 +475,25 @@ static int __init handle_linux_pci_domain(struct kernel_info *kinfo,
     return fdt_property_cell(kinfo->fdt, "linux,pci-domain", segment);
 }
 
+const char *__init hwdom_bootargs(const char *module_cmdline)
+{
+    const struct dt_device_node *chosen = dt_find_node_by_path("/chosen");
+    const char *bootargs;
+
+    if ( chosen &&
+         (bootargs = dt_get_property(chosen, "xen,dom0-bootargs", NULL)) )
+        return bootargs;
+    if ( module_cmdline && module_cmdline[0] )
+        return module_cmdline;
+
+    return chosen ? dt_get_property(chosen, "bootargs", NULL) : NULL;
+}
+
 static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
                                    const struct dt_device_node *node)
 {
-    const char *bootargs = NULL;
     const struct dt_property *prop, *status = NULL;
     int res = 0;
-    int had_dom0_bootargs = 0;
-
-    if ( kinfo->bd.cmdline && kinfo->bd.cmdline[0] )
-        bootargs = &kinfo->bd.cmdline[0];
 
     /*
      * The IOMMU specific properties of a master ("iommus", "iommu-map")
@@ -501,8 +510,6 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
         /*
          * In chosen node:
          *
-         * * remember xen,dom0-bootargs if we don't already have
-         *   bootargs (from module #1, above).
          * * remove bootargs,  xen,dom0-bootargs, xen,xen-bootargs,
          *   xen,static-heap, linux,initrd-start and linux,initrd-end.
          * * remove stdout-path.
@@ -514,6 +521,8 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
         if ( dt_node_path_is_equal(node, "/chosen") )
         {
             if ( dt_property_name_is_equal(prop, "xen,static-heap") ||
+                 dt_property_name_is_equal(prop, "bootargs") ||
+                 dt_property_name_is_equal(prop, "xen,dom0-bootargs") ||
                  dt_property_name_is_equal(prop, "xen,xen-bootargs") ||
                  dt_property_name_is_equal(prop, "linux,initrd-start") ||
                  dt_property_name_is_equal(prop, "linux,initrd-end") ||
@@ -524,19 +533,6 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
                  dt_property_name_is_equal(prop, "linux,uefi-mmap-desc-size") ||
                  dt_property_name_is_equal(prop, "linux,uefi-mmap-desc-ver"))
                 continue;
-
-            if ( dt_property_name_is_equal(prop, "xen,dom0-bootargs") )
-            {
-                had_dom0_bootargs = 1;
-                bootargs = prop->value;
-                continue;
-            }
-            if ( dt_property_name_is_equal(prop, "bootargs") )
-            {
-                if ( !bootargs  && !had_dom0_bootargs )
-                    bootargs = prop->value;
-                continue;
-            }
         }
 
         /* Don't expose the property "xen,passthrough" to the guest */
@@ -577,6 +573,7 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
     if ( dt_node_path_is_equal(node, "/chosen") )
     {
         const struct boot_module *initrd = kinfo->bd.initrd;
+        const char *bootargs = hwdom_bootargs(kinfo->bd.cmdline);
 
         if ( bootargs )
         {
