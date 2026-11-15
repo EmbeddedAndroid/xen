@@ -41,6 +41,7 @@ static int __init alloc_domain_evtchn(struct dt_device_node *node)
     struct evtchn_alloc_unbound alloc_unbound;
     struct evtchn_bind_interdomain bind_interdomain;
     struct domain *d1 = NULL, *d2 = NULL;
+    struct vcpu *old_current;
 
     if ( !dt_device_is_compatible(node, "xen,evtchn-v1") )
         return 0;
@@ -100,7 +101,14 @@ static int __init alloc_domain_evtchn(struct dt_device_node *node)
     alloc_unbound.dom = d1->domain_id;
     alloc_unbound.remote_dom = d2->domain_id;
 
+    /*
+     * As for the xenstore event channel: run the XSM check as the local
+     * domain, not the idle vCPU, which an untargetable domain refuses.
+     */
+    old_current = current;
+    set_current(d1->vcpu[0]);
     rc = evtchn_alloc_unbound(&alloc_unbound, domU1_port);
+    set_current(old_current);
     if ( rc < 0 )
     {
         printk(XENLOG_ERR
