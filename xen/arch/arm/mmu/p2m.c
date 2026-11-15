@@ -540,6 +540,11 @@ static void p2m_set_permission(lpae_t *e, p2m_type_t t, p2m_access_t a)
         e->p2m.write = 0;
         break;
 
+    case p2m_mmio_direct_cx:
+        e->p2m.xn = 0;
+        e->p2m.write = 1;
+        break;
+
     case p2m_iommu_map_rw:
     case p2m_map_foreign_rw:
     case p2m_grant_map_rw:
@@ -623,6 +628,7 @@ static lpae_t mfn_to_p2m_entry(mfn_t mfn, p2m_type_t t, p2m_access_t a)
         break;
 
     case p2m_mmio_direct_c:
+    case p2m_mmio_direct_cx:
         e.p2m.mattr = MATTR_MEM;
         e.p2m.sh = LPAE_SH_OUTER;
         break;

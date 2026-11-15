@@ -99,7 +99,7 @@ static bool qcom_domain_owns(struct domain *d, paddr_t addr, paddr_t size)
         mfn_t mfn = p2m_lookup(d, gfn, &t);
 
         if ( mfn_eq(mfn, INVALID_MFN) ||
-             (t != p2m_ram_rw && t != p2m_mmio_direct_c) )
+             (t != p2m_ram_rw && !p2m_is_direct_c(t)) )
             return false;
     }
 

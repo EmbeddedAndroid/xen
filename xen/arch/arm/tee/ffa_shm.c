@@ -91,7 +91,7 @@ struct ffa_shm_mem {
     /*
      * Lent pages are out of the lender's p2m while the SPMC holds them;
      * lend_type is what they are mapped back as. Reserved memory of a
-     * direct-mapped hardware domain (p2m_mmio_direct_c) has no page
+     * direct-mapped hardware domain (p2m_is_direct_c()) has no page
      * reference taken.
      */
     bool lend;
@@ -172,7 +172,7 @@ static int32_t get_lend_page(struct domain *d, struct ffa_shm_mem *shm,
         if ( !is_hardware_domain(d) || !is_domain_direct_mapped(d) )
             return FFA_RET_DENIED;
         mfn = p2m_lookup(d, gfn, &t);
-        if ( t != p2m_mmio_direct_c || !mfn_eq(mfn, _mfn(gfn_x(gfn))) ||
+        if ( !p2m_is_direct_c(t) || !mfn_eq(mfn, _mfn(gfn_x(gfn))) ||
              !mfn_valid(mfn) )
             return FFA_RET_DENIED;
     }

@@ -1865,6 +1865,12 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
     {
         res_mem_node_found = true;
         /*
+         * Firmware the hardware domain loads for a remote processor runs
+         * from these regions, and the processor fetches it through the
+         * stage 2 the SMMU shares with the CPU: map them executable.
+         */
+        p2mt = p2m_mmio_direct_cx;
+        /*
          * Avoid duplicate /reserved-memory nodes in Device Tree, so add the
          * static shared memory nodes there.
          */

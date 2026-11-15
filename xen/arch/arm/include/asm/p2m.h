@@ -135,6 +135,7 @@ typedef enum {
     p2m_mmio_direct_dev,/* Read/write mapping of genuine Device MMIO area */
     p2m_mmio_direct_nc, /* Read/write mapping of genuine MMIO area non-cacheable */
     p2m_mmio_direct_c,  /* Read/write mapping of genuine MMIO area cacheable */
+    p2m_mmio_direct_cx, /* Read/write/execute mapping of reserved memory cacheable */
     p2m_map_foreign_rw, /* Read/write RAM pages from foreign domain */
     p2m_map_foreign_ro, /* Read-only RAM pages from foreign domain */
     p2m_grant_map_rw,   /* Read/write grant mapping */
@@ -166,7 +167,12 @@ static inline p2m_type_t arch_dt_passthrough_p2m_type(void)
                            p2m_to_mask(p2m_map_foreign_ro))
 
 /* Useful predicates */
+/* Cacheable 1:1 mappings (RAM or MMIO), no page reference held */
+#define P2M_DIRECT_C_TYPES (p2m_to_mask(p2m_mmio_direct_c) |   \
+                            p2m_to_mask(p2m_mmio_direct_cx))
+
 #define p2m_is_ram(_t) (p2m_to_mask(_t) & P2M_RAM_TYPES)
+#define p2m_is_direct_c(_t) (p2m_to_mask(_t) & P2M_DIRECT_C_TYPES)
 #define p2m_is_foreign(_t) (p2m_to_mask(_t) & P2M_FOREIGN_TYPES)
 #define p2m_is_any_ram(_t) (p2m_to_mask(_t) &                   \
                             (P2M_RAM_TYPES | P2M_GRANT_TYPES |  \
