@@ -971,6 +971,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
     int rc;
     /* A mapping is removed if the MFN is invalid. */
     bool removing_mapping = mfn_eq(smfn, INVALID_MFN);
+    bool split = false;
     DECLARE_OFFSETS(offsets, gfn_to_gaddr(sgfn));
 
     ASSERT(p2m_is_write_locked(p2m));
@@ -1045,6 +1046,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
         p2m_force_tlb_flush_sync(p2m);
 
         p2m_write_pte(entry, split_pte, p2m->clean_pte);
+        split = true;
 
         /* then move to the level we want to make real changes */
         for ( ; level < target; level++ )
@@ -1132,8 +1134,19 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
         p2m->lowest_mapped_gfn = gfn_min(p2m->lowest_mapped_gfn, sgfn);
     }
 
+    /*
+     * A caller that set iommu_dont_flush_iotlb flushes the IOMMU itself once
+     * it is done. Flush now anyway when a superpage was split, so the IOMMU
+     * never holds the block and its pages at once, and when freeing the old
+     * entry below releases a foreign page or a page table, which the IOMMU
+     * must no longer reach by then.
+     */
     if ( is_iommu_enabled(p2m->domain) &&
-         (lpae_is_valid(orig_pte) || lpae_is_valid(*entry)) )
+         (lpae_is_valid(orig_pte) || lpae_is_valid(*entry)) &&
+         (!this_cpu(iommu_dont_flush_iotlb) || split ||
+          (p2m_is_valid(orig_pte) &&
+           (p2m_is_foreign(orig_pte.p2m.type) ||
+            (level < 3 && !p2m_is_superpage(orig_pte, level))))) )
     {
         unsigned int flush_flags = 0;
 
