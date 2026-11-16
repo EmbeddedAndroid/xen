@@ -571,7 +571,8 @@ domain whose memory is not accessible to the toolstack domain.
 Specify the maximum number of grant frames the domain is allowed to have.
 This value controls how many pages the domain is able to grant access to for
 other domains, needed e.g. for the operation of paravirtualized devices.
-The default is settable via L<xl.conf(5)>.
+The default is settable via L<xl.conf(5)>. On Arm the value cannot exceed
+the 16384 frames of the region the guest maps its grant table in.
 
 =item B<max_maptrack_frames=NUMBER>
 

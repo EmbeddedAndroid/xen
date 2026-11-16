@@ -82,6 +82,15 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
     uint32_t virtio_mmio_irq = GUEST_VIRTIO_MMIO_SPI_FIRST;
     int rc;
 
+    if (d_config->b_info.max_grant_frames != LIBXL_MAX_GRANT_DEFAULT &&
+        d_config->b_info.max_grant_frames > GUEST_GNTTAB_SIZE >> XC_PAGE_SHIFT) {
+        LOG(ERROR,
+            "max_grant_frames %u exceeds the %llu frames of the grant table region",
+            d_config->b_info.max_grant_frames,
+            GUEST_GNTTAB_SIZE >> XC_PAGE_SHIFT);
+        return ERROR_INVAL;
+    }
+
     /*
      * If pl011 vuart is enabled then increment the nr_spis to allow allocation
      * of SPI VIRQ for pl011.
