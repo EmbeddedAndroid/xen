@@ -433,6 +433,45 @@ static inline void gnttab_flush_tlb(const struct domain *d)
         arch_flush_tlb_mask(d->dirty_cpumask);
 }
 
+/*
+ * On Arm, every grant a direct-mapped domain with an IOMMU maps or unmaps
+ * changes its host and its 1:1 bus mapping, and each change would
+ * invalidate the IOMMU TLB on its own, at a far higher cost than the
+ * update. The map and unmap hypercalls defer those flushes and issue one
+ * with gnttab_flush_iotlb() before they drop a page reference and before
+ * they return.
+ */
+static bool gnttab_defer_iotlb_flush(const struct domain *d)
+{
+#ifdef CONFIG_HAS_PASSTHROUGH
+    if ( IS_ENABLED(CONFIG_ARM) && gnttab_need_iommu_mapping(d) &&
+         !this_cpu(iommu_dont_flush_iotlb) )
+    {
+        this_cpu(iommu_dont_flush_iotlb) = true;
+        return true;
+    }
+#endif
+    return false;
+}
+
+static int gnttab_flush_iotlb(struct domain *d)
+{
+#ifdef CONFIG_HAS_PASSTHROUGH
+    if ( this_cpu(iommu_dont_flush_iotlb) )
+        return iommu_iotlb_flush_all(d, IOMMU_FLUSHF_added |
+                                        IOMMU_FLUSHF_modified);
+#endif
+    return 0;
+}
+
+static void gnttab_stop_iotlb_defer(bool deferred)
+{
+#ifdef CONFIG_HAS_PASSTHROUGH
+    if ( deferred )
+        this_cpu(iommu_dont_flush_iotlb) = false;
+#endif
+}
+
 static inline unsigned int
 num_act_frames_from_sha_frames(const unsigned int num)
 {
@@ -1349,6 +1388,10 @@ map_grant_ref(
         gnttab_flush_tlb(ld);
     }
 
+    /* If the flush fails, the IOMMU may still reach the page: leak it. */
+    if ( gnttab_flush_iotlb(ld) )
+        typecnt = refcnt = 0;
+
     while ( typecnt-- )
         put_page_type(pg);
 
@@ -1399,24 +1442,40 @@ static long
 gnttab_map_grant_ref(
     XEN_GUEST_HANDLE_PARAM(gnttab_map_grant_ref_t) uop, unsigned int count)
 {
-    int i;
+    struct domain *ld = current->domain;
+    bool deferred = gnttab_defer_iotlb_flush(ld);
+    int i, rc = 0, ret;
     struct gnttab_map_grant_ref op;
 
     for ( i = 0; i < count; i++ )
     {
         if ( i && hypercall_preempt_check() )
-            return i;
+        {
+            rc = i;
+            break;
+        }
 
         if ( unlikely(__copy_from_guest_offset(&op, uop, i, 1)) )
-            return -EFAULT;
+        {
+            rc = -EFAULT;
+            break;
+        }
 
         map_grant_ref(&op);
 
         if ( unlikely(__copy_to_guest_offset(uop, i, &op, 1)) )
-            return -EFAULT;
+        {
+            rc = -EFAULT;
+            break;
+        }
     }
 
-    return 0;
+    ret = gnttab_flush_iotlb(ld);
+    gnttab_stop_iotlb_defer(deferred);
+    if ( unlikely(ret) && rc >= 0 )
+        rc = ret;
+
+    return rc;
 }
 
 static void
@@ -1713,7 +1772,9 @@ static long
 gnttab_unmap_grant_ref(
     XEN_GUEST_HANDLE_PARAM(gnttab_unmap_grant_ref_t) uop, unsigned int count)
 {
-    int i, c, partial_done, done = 0;
+    struct domain *ld = current->domain;
+    bool deferred = gnttab_defer_iotlb_flush(ld);
+    int i, c, partial_done, done = 0, ret = 0, rc;
     struct gnttab_unmap_grant_ref op;
     struct gnttab_unmap_common common[GNTTAB_UNMAP_BATCH_SIZE];
 
@@ -1733,25 +1794,36 @@ gnttab_unmap_grant_ref(
             guest_handle_add_offset(uop, 1);
         }
 
-        gnttab_flush_tlb(current->domain);
+        gnttab_flush_tlb(ld);
+        rc = gnttab_flush_iotlb(ld);
 
-        for ( i = 0; i < partial_done; i++ )
-            unmap_common_complete(&common[i]);
+        /* On a failed flush the IOMMU may still reach the pages: leak them. */
+        if ( unlikely(rc) )
+            ret = rc;
+        else
+            for ( i = 0; i < partial_done; i++ )
+                unmap_common_complete(&common[i]);
 
         count -= c;
         done += c;
 
         if ( count && hypercall_preempt_check() )
-            return done;
+        {
+            gnttab_stop_iotlb_defer(deferred);
+            return ret ?: done;
+        }
     }
 
-    return 0;
+    gnttab_stop_iotlb_defer(deferred);
+    return ret;
 
 fault:
-    gnttab_flush_tlb(current->domain);
+    gnttab_flush_tlb(ld);
 
-    for ( i = 0; i < partial_done; i++ )
-        unmap_common_complete(&common[i]);
+    if ( !gnttab_flush_iotlb(ld) )
+        for ( i = 0; i < partial_done; i++ )
+            unmap_common_complete(&common[i]);
+    gnttab_stop_iotlb_defer(deferred);
     return -EFAULT;
 }
 
@@ -1778,7 +1850,9 @@ static long
 gnttab_unmap_and_replace(
     XEN_GUEST_HANDLE_PARAM(gnttab_unmap_and_replace_t) uop, unsigned int count)
 {
-    int i, c, partial_done, done = 0;
+    struct domain *ld = current->domain;
+    bool deferred = gnttab_defer_iotlb_flush(ld);
+    int i, c, partial_done, done = 0, ret = 0, rc;
     struct gnttab_unmap_and_replace op;
     struct gnttab_unmap_common common[GNTTAB_UNMAP_BATCH_SIZE];
 
@@ -1798,25 +1872,36 @@ gnttab_unmap_and_replace(
             guest_handle_add_offset(uop, 1);
         }
 
-        gnttab_flush_tlb(current->domain);
+        gnttab_flush_tlb(ld);
+        rc = gnttab_flush_iotlb(ld);
 
-        for ( i = 0; i < partial_done; i++ )
-            unmap_common_complete(&common[i]);
+        /* On a failed flush the IOMMU may still reach the pages: leak them. */
+        if ( unlikely(rc) )
+            ret = rc;
+        else
+            for ( i = 0; i < partial_done; i++ )
+                unmap_common_complete(&common[i]);
 
         count -= c;
         done += c;
 
         if ( count && hypercall_preempt_check() )
-            return done;
+        {
+            gnttab_stop_iotlb_defer(deferred);
+            return ret ?: done;
+        }
     }
 
-    return 0;
+    gnttab_stop_iotlb_defer(deferred);
+    return ret;
 
 fault:
-    gnttab_flush_tlb(current->domain);
+    gnttab_flush_tlb(ld);
 
-    for ( i = 0; i < partial_done; i++ )
-        unmap_common_complete(&common[i]);
+    if ( !gnttab_flush_iotlb(ld) )
+        for ( i = 0; i < partial_done; i++ )
+            unmap_common_complete(&common[i]);
+    gnttab_stop_iotlb_defer(deferred);
     return -EFAULT;
 }
 
