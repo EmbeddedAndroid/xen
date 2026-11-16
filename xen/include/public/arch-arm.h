@@ -472,11 +472,11 @@ typedef uint64_t xen_callback_t;
 #define GUEST_VPCI_MEM_SIZE                 xen_mk_ullong(0x10000000)
 
 /*
- * 16MB == 4096 pages reserved for guest to use as a region to map its
- * grant table in.
+ * 64MB == 16384 pages reserved for guest to use as a region to map its
+ * grant table in (8M v1 entries, 32GB worth of 4K grants).
  */
-#define GUEST_GNTTAB_BASE xen_mk_ullong(0x38000000)
-#define GUEST_GNTTAB_SIZE xen_mk_ullong(0x01000000)
+#define GUEST_GNTTAB_BASE xen_mk_ullong(0x34000000)
+#define GUEST_GNTTAB_SIZE xen_mk_ullong(0x04000000)
 
 #define GUEST_MAGIC_BASE  xen_mk_ullong(0x39000000)
 #define GUEST_MAGIC_SIZE  xen_mk_ullong(0x01000000)
