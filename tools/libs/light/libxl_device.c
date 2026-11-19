@@ -820,6 +820,7 @@ int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
     int rc;
     uint32_t domid;
     int libxl_only = dev->backend_kind == LIBXL__DEVICE_KIND_NONE;
+    bool toolstack;
 
     if (!libxl_only) {
         be_path = libxl__device_backend_path(gc, dev);
@@ -829,11 +830,17 @@ int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
     rc = libxl__get_domid(gc, &domid);
     if (rc) goto out;
 
+    /*
+     * A driver domain only destroys devices it is the backend of, so any
+     * other caller is the toolstack, wherever it runs.
+     */
+    toolstack = domid == LIBXL_TOOLSTACK_DOMID || domid != dev->backend_domid;
+
     for (;;) {
         rc = libxl__xs_transaction_start(gc, &t);
         if (rc) goto out;
 
-        if (domid == LIBXL_TOOLSTACK_DOMID) {
+        if (toolstack) {
             /*
              * The toolstack domain is in charge of removing the
              * frontend and libxl paths.
@@ -848,10 +855,10 @@ int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
              * from the backend path.
              */
             libxl__xs_path_cleanup(gc, t, be_path);
-        } else if (domid == LIBXL_TOOLSTACK_DOMID && !libxl_only) {
+        } else if (toolstack && !libxl_only) {
             /*
-             * Then, toolstack domain is in charge of removing the parent
-             * directory if empty already.
+             * Then, the toolstack removes what the backend domain could
+             * not remove itself.
              */
             libxl__xs_path_cleanup(gc, t, be_path);
         }
